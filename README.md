@@ -1,9 +1,12 @@
-# runtime
-RapidFort runtime releases
+<a href="https://rapidfort.com?utm_source=github&utm_medium=ci_rf_link&utm_campaign=sep_01_sprint&utm_term=ci_main_landing&utm_content=main_landing_logo">
+<img src="/contrib/github_logo.png" alt="RapidFort" width="200" />
+</a>
+
+<h1> RapidFort Runtime Release </h1>
 
 ## download
 
-### MAC
+### Mac (Darwin ARM64)
 	wget https://github.com/rapidfort/runtime/releases/download/1.0.20/rf-cmd-darwin-arm64 ; chmod +x rf-cmd-darwin-arm64; sudo mv rf-cmd-darwin-arm64 /usr/local/bin/rf-cmd
 
 ### Linux
