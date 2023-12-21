@@ -4,7 +4,7 @@
 
 <h1> RapidFort Runtime Release </h1>
 
-Here you can download our RapidFort Runtime installation script and use this to install our Runtime tooling
+Here you can download our RapidFort Runtime installation script and use this to install our Runtime tooling into your Kubernetes environment.
 
 ## Downloads
 
