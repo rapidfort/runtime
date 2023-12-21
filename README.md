@@ -23,3 +23,8 @@ Here you can download our RapidFort Runtime installation script and use this to 
 	rf-cmd -cmd uninstall
 
 
+## Need Support
+
+<a href="https://join.slack.com/t/rapidfortcommunity/shared_invite/zt-1g3wy28lv-DaeGexTQ5IjfpbmYW7Rm_Q">
+<img src="/contrib/github_banner.png" alt="RapidFort Community Slack" width="600" />
+</a>
