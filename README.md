@@ -13,4 +13,4 @@ RapidFort runtime releases
 	rf-cmd -cmd uninstall
 
 ## usage - install
-	rf-cmd -cmd install -h us01.rapidfort.com -u <username> -p <password> -ru <registry-username> -rp <registry-password> --rev 1.0.20
+	rf-cmd -cmd install --rev 1.0.20 -h us01.rapidfort.com -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
