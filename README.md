@@ -1,16 +1,25 @@
-# runtime
-RapidFort runtime releases
+<a href="https://rapidfort.com?utm_source=github&utm_medium=ci_rf_link&utm_campaign=sep_01_sprint&utm_term=ci_main_landing&utm_content=main_landing_logo">
+<img src="/contrib/github_logo.png" alt="RapidFort" width="200" />
+</a>
 
-## download
+<h1> RapidFort Runtime Release </h1>
 
-### MAC
+Here you can download our RapidFort Runtime installation script and use this to install our Runtime tooling
+
+## Downloads
+
+#### Mac (Darwin ARM64)
 	wget https://github.com/rapidfort/runtime/releases/download/1.0.20/rf-cmd-darwin-arm64 ; chmod +x rf-cmd-darwin-arm64; sudo mv rf-cmd-darwin-arm64 /usr/local/bin/rf-cmd
 
-### Linux
+#### Linux
 	wget https://github.com/rapidfort/runtime/releases/download/1.0.20/rf-cmd-linux-amd64 ; chmod +x rf-cmd-linux-amd64; sudo mv rf-cmd-linux-amd64 /usr/local/bin/rf-cmd
 
-## usage - uninstall
+## Usage
+
+#### Install
+	rf-cmd -cmd install --rev 1.0.20 -h us01.rapidfort.com -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
+ 
+#### Uninstall
 	rf-cmd -cmd uninstall
 
-## usage - install
-	rf-cmd -cmd install --rev 1.0.20 -h us01.rapidfort.com -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
+
