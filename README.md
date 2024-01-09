@@ -17,7 +17,7 @@ Here you can download our RapidFort Runtime installation script and use this to 
 ## Usage
 
 #### Install
-	rf-cmd -cmd install --rev 1.0.20 -h us01.rapidfort.com -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
+	rf-cmd -cmd install --rev 1.0.20-310 -h us01.rapidfort.com -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
  
 #### Uninstall
 	rf-cmd -cmd uninstall
