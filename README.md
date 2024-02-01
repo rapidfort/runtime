@@ -9,15 +9,15 @@ Here you can download our RapidFort Runtime installation script and use this to 
 ## Downloads
 
 #### Mac (Darwin ARM64)
-	wget https://github.com/rapidfort/runtime/releases/download/1.0.20/rf-cmd-darwin-arm64 ; chmod +x rf-cmd-darwin-arm64; sudo mv rf-cmd-darwin-arm64 /usr/local/bin/rf-cmd
+	wget https://github.com/rapidfort/runtime/releases/download/1.0.21/rf-cmd-darwin-arm64 ; chmod +x rf-cmd-darwin-arm64; sudo mv rf-cmd-darwin-arm64 /usr/local/bin/rf-cmd
 
 #### Linux
-	wget https://github.com/rapidfort/runtime/releases/download/1.0.20/rf-cmd-linux-amd64 ; chmod +x rf-cmd-linux-amd64; sudo mv rf-cmd-linux-amd64 /usr/local/bin/rf-cmd
+	wget https://github.com/rapidfort/runtime/releases/download/1.0.21/rf-cmd-linux-amd64 ; chmod +x rf-cmd-linux-amd64; sudo mv rf-cmd-linux-amd64 /usr/local/bin/rf-cmd
 
 ## Usage
 
 #### Install
-	rf-cmd -cmd install --rev 1.0.20-310 -h us01.rapidfort.com -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
+	rf-cmd -cmd install --rev 1.0.21-335 -h us01.rapidfort.com -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
  
 #### Uninstall
 	rf-cmd -cmd uninstall
