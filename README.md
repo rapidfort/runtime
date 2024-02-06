@@ -16,8 +16,11 @@ Here you can download our RapidFort Runtime installation script and use this to 
 
 ## Usage
 
-#### Install
-	rf-cmd -cmd install --rev 1.0.21-335 -h us01.rapidfort.com -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
+#### Install for SAAS
+	rf-cmd -cmd install --rev 1.0.21-335 -u <username> -p <password>
+
+#### Install for On-Prem
+	rf-cmd -cmd install --rev 1.0.21-335 -h <rf_host> -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
  
 #### Uninstall
 	rf-cmd -cmd uninstall
