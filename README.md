@@ -17,10 +17,10 @@ Here you can download our RapidFort Runtime installation script and use this to 
 ## Usage
 
 #### Install for SAAS
-	rf-cmd -cmd install --rev 1.0.21-61 -u <username> -p <password>
+	rf-cmd -cmd install --rev 1.0.21-61 -u <username> -p <password> -t 1.0.21-1785bca-61-rfhardened	
 
 #### Install for On-Prem
-	rf-cmd -cmd install --rev 1.0.21-61 -h <rf_host> -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
+	rf-cmd -cmd install --rev 1.0.21-61 -t 1.0.21-1785bca-61-rfhardened -h <rf_host> -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
  
 #### Uninstall
 	rf-cmd -cmd uninstall
