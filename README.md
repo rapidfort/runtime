@@ -9,21 +9,21 @@ Here you can download our RapidFort Runtime installation script and use this to 
 ## Downloads
 
 #### Mac (Darwin ARM64)
-	wget https://github.com/rapidfort/runtime/releases/download/1.0.21/rf-cmd-darwin-arm64 ; chmod +x rf-cmd-darwin-arm64; sudo mv rf-cmd-darwin-arm64 /usr/local/bin/rf-cmd
+	wget https://github.com/rapidfort/runtime/releases/download/1.0.21/rf-cmd-darwin-arm64 ; chmod a+x rf-cmd-darwin-arm64; sudo mv rf-cmd-darwin-arm64 /usr/local/bin/rf-cmd
 
 #### Linux
-	wget https://github.com/rapidfort/runtime/releases/download/1.0.21/rf-cmd-linux-amd64 ; chmod +x rf-cmd-linux-amd64; sudo mv rf-cmd-linux-amd64 /usr/local/bin/rf-cmd
+	wget https://github.com/rapidfort/runtime/releases/download/1.0.21/rf-cmd-linux-amd64 ; chmod a+x rf-cmd-linux-amd64; sudo mv rf-cmd-linux-amd64 /usr/local/bin/rf-cmd
 
 ## Usage
 
-#### Install for SAAS
-	rf-cmd -cmd install --rev 1.0.21-61 -u <username> -p <password>	
+#### Deploy for SaaS
+	rf-cmd --cmd install --rev 1.0.21-61 -u <username> -p <password>	
 
-#### Install for On-Prem
-	rf-cmd -cmd install --rev 1.0.21-61 -h <rf_host> -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
+#### Deploy for On-Prem
+	rf-cmd --cmd install --rev 1.0.21-61 -h <rf_host> -u <username> -p <password> -ru <registry-username> -rp <registry-password> 
  
 #### Uninstall
-	rf-cmd -cmd uninstall
+	rf-cmd --cmd uninstall
 
 
 ## Need Support
