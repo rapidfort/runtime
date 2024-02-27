@@ -1,0 +1,30 @@
+
+name: RF Runtime Release publish
+
+# Controls when the workflow will run
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      patch-version:
+        description: 'Patch Version Number (1.0.XX)'
+        required: true
+        default: '22'
+        type: string
+      build-number:
+        description: 'Patch Version Number (1.0.22-XX)'
+        required: true
+        default: '1'
+        type: string
+
+jobs:
+  publish-release:
+    runs-on: rf-ephemeral
+    steps:
+    - name: Create release
+      env:
+        PATCH_VERSION: ${{ inputs.patch-version }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+      run: |
+        REVISION="1.0.$PATCH_VERSION-$BUILD_NUMBER"
+        az storage blob download --account-name ${{ secrets.PRODMON_STORAGE_ACCOUNT }} --account-key ${{ secrets.PRODMON_STORAGE_KEY }} --container-name "releases" --name rfcmd-$REVISION.tar.gz --file rfcmd-$REVISION.tar.gz
