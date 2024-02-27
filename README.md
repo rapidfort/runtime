@@ -6,13 +6,26 @@
 
 Here you can download our RapidFort Runtime installation script and use this to install our Runtime tooling into your Kubernetes environment.
 
+## Version
+   Get the [latest release](https://github.com/rapidfort/runtime/releases/latest) version.
+
+   ```sh
+   VERSION=$(curl -s "https://api.github.com/repos/rapidfort/runtime/releases/latest" | jq -r '.tag_name')
+   ```
+
+   or set a specific version:
+
+   ```sh
+   VERSION=X.Y.Z   # Version number with a leading v
+   ```
+
 ## Downloads
 
 #### Mac (Darwin ARM64)
-	curl -LO https://github.com/rapidfort/runtime/releases/download/1.0.22/rf-cmd-darwin-arm64 ; chmod a+x rf-cmd-darwin-arm64; sudo mv rf-cmd-darwin-arm64 /usr/local/bin/rf-cmd
+	curl -LO https://github.com/rapidfort/runtime/releases/download/${VERSION}/rf-cmd-darwin-arm64 ; chmod a+x rf-cmd-darwin-arm64; sudo mv rf-cmd-darwin-arm64 /usr/local/bin/rf-cmd
 
 #### Linux
-	curl -LO https://github.com/rapidfort/runtime/releases/download/1.0.22/rf-cmd-linux-amd64 ; chmod a+x rf-cmd-linux-amd64; sudo mv rf-cmd-linux-amd64 /usr/local/bin/rf-cmd
+	curl -LO https://github.com/rapidfort/runtime/releases/download/${VERSION}/rf-cmd-linux-amd64 ; chmod a+x rf-cmd-linux-amd64; sudo mv rf-cmd-linux-amd64 /usr/local/bin/rf-cmd
 
 ## Usage
 
