@@ -19,7 +19,7 @@ on:
 
 jobs:
   publish-release:
-    runs-on: rf-ephemeral
+    runs-on: ubuntu-latest
     steps:
     - name: Create release
       env:
