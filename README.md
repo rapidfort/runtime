@@ -16,7 +16,7 @@ Here you can download our RapidFort Runtime installation script and use this to 
    or set a specific version:
 
    ```sh
-   VERSION=X.Y.Z   # Version number with a leading v
+   VERSION=X.Y.Z   # Version number
    ```
 
 ## Downloads
