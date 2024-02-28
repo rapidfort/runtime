@@ -71,11 +71,12 @@ jobs:
       run: |
         images=$(yq eval '.global.azure.images | keys '  cnab_bundle/k8s-scanner/values.yaml)
         # Iterate over the images using a Bash for loop
-        while IFS= read -r image; do
+        while IFS= read -r image_key; do
           # Remove "-" and extra space from the image
-          image=${image//- /}
-          image=$(yq eval ".global.azure.images.${image}.image" cnab_bundle/k8s-scanner/values.yaml)
-          registry=$(yq eval ".global.azure.images.${image}.registry" cnab_bundle/k8s-scanner/values.yaml)
-          tag=$(yq eval ".global.azure.images.${image}.tag" cnab_bundle/k8s-scanner/values.yaml)
+          image_key=${image_key//- /}
+          echo "fetching details for ${image_key}"
+          image=$(yq eval ".global.azure.images.${image_key}.image" cnab_bundle/k8s-scanner/values.yaml)
+          registry=$(yq eval ".global.azure.images.${image_key}.registry" cnab_bundle/k8s-scanner/values.yaml)
+          tag=$(yq eval ".global.azure.images.${image_key}.tag" cnab_bundle/k8s-scanner/values.yaml)
           crane copy "${registry}/${image}:${tag}" rfruntimeoffer.azurecr.io/"${image}:${tag}"
-        done <<< "$images"
+        done <<< "$image_key"
