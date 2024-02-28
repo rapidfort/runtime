@@ -34,8 +34,29 @@ jobs:
       with:
         name: 1.0.${{ inputs.patch-version }}
         tag_name: 1.0.${{ inputs.patch-version }}
-        body: |
-          Changelog
+        body_path: CHANGELOG.md
         files: |
           rf-cmd-darwin-arm64
           rf-cmd-linux-amd64
+    - name: Install crane
+      run: |
+        VERSION=$(curl -s "https://api.github.com/repos/google/go-containerregistry/releases/latest" | jq -r '.tag_name')
+        OS=Linux
+        ARCH=x86_64
+        curl -sL "https://github.com/google/go-containerregistry/releases/download/${VERSION}/go-containerregistry_${OS}_${ARCH}.tar.gz" > go-containerregistry.tar.gz
+        tar -zxvf go-containerregistry.tar.gz -C /usr/local/bin/ crane
+        crane --version
+
+    - name: crane login to quay
+      run: crane auth login quay.io -u ${{ secrets.RF_QUAY_USERNAME }} -p ${{ secrets.RF_QUAY_PASSWORD }}
+
+    - name: crane login to rfruntimeoffer
+      run: crane auth login rfruntimeoffer.azurecr.io -u ${{ secrets.RF_AZURE_RUNTIMEOFFER_USERNAME }} -p ${{ secrets.RF_AZURE_RUNTIMEOFFER_PASSWORD }}
+
+    - name: download CNAB bundle
+      run: |
+        REVISION=1.0.${{ inputs.patch-version }}-${{ inputs.build-number }}
+        az storage blob download --account-name ${{ secrets.PRODMON_STORAGE_ACCOUNT }} --account-key ${{ secrets.PRODMON_STORAGE_KEY }} --container-name "releases" --name cnab-$REVISION.tar.gz --file cnab-$REVISION.tar.gz
+        rm -rf cnab_bundle
+        mkdir -p cnab_bundle
+        tar -xvzf cnab-$REVISION.tar.gz -C cnab_bundle
