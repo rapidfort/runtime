@@ -69,7 +69,7 @@ jobs:
 
     - name: copy quay to rfruntime
       run: |
-        images=$(yq eval '.global.azure.images | keys '  cnab_bundle/k8s-scanner/values.yaml)
+        image_keys=$(yq eval '.global.azure.images | keys '  cnab_bundle/k8s-scanner/values.yaml)
         # Iterate over the images using a Bash for loop
         while IFS= read -r image_key; do
           # Remove "-" and extra space from the image
@@ -79,4 +79,4 @@ jobs:
           registry=$(yq eval ".global.azure.images.${image_key}.registry" cnab_bundle/k8s-scanner/values.yaml)
           tag=$(yq eval ".global.azure.images.${image_key}.tag" cnab_bundle/k8s-scanner/values.yaml)
           crane copy "${registry}/${image}:${tag}" rfruntimeoffer.azurecr.io/"${image}:${tag}"
-        done <<< "$image_key"
+        done <<< "$image_keys"
