@@ -21,7 +21,7 @@ jobs:
   publish-release:
     runs-on: ubuntu-latest
     steps:
-    - name: Create release
+    - name: Download release
       env:
         PATCH_VERSION: ${{ inputs.patch-version }}
         BUILD_NUMBER: ${{ inputs.build-number }}
@@ -29,7 +29,7 @@ jobs:
         REVISION="1.0.$PATCH_VERSION-$BUILD_NUMBER"
         az storage blob download --account-name ${{ secrets.PRODMON_STORAGE_ACCOUNT }} --account-key ${{ secrets.PRODMON_STORAGE_KEY }} --container-name "releases" --name rfcmd-$REVISION.tar.gz --file rfcmd-$REVISION.tar.gz
         tar xvzf rfcmd-$REVISION.tar.gz
-    - name: Release
+    - name: Make Release
       uses: softprops/action-gh-release@v1
       with:
         name: 1.0.${{ inputs.patch-version }}
@@ -45,7 +45,7 @@ jobs:
         ARCH=x86_64
         curl -sL "https://github.com/google/go-containerregistry/releases/download/${VERSION}/go-containerregistry_${OS}_${ARCH}.tar.gz" > go-containerregistry.tar.gz
         tar -zxvf go-containerregistry.tar.gz -C /usr/local/bin/ crane
-        crane --version
+        crane version
 
     - name: crane login to quay
       run: crane auth login quay.io -u ${{ secrets.RF_QUAY_USERNAME }} -p ${{ secrets.RF_QUAY_PASSWORD }}
@@ -60,3 +60,20 @@ jobs:
         rm -rf cnab_bundle
         mkdir -p cnab_bundle
         tar -xvzf cnab-$REVISION.tar.gz -C cnab_bundle
+
+    - name: download yq
+      run: |
+        yq_url=https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        wget -q "$yq_url" -O /usr/local/bin/yq
+        yq --version
+
+    - name: copy quay to rfruntime
+      run: |
+        keys=$(yq eval '.global.azure.images | keys '  cnab_bundle/k8s-scanner/values.yaml)
+        # Iterate over the keys using a Bash for loop
+        while IFS= read -r key; do
+          # Remove "-" and extra space from the key
+          key=${key//- /}
+          echo "Processing key: $key"
+          # Perform actions on each key here
+        done <<< "$keys"
