@@ -21,6 +21,8 @@ jobs:
   publish-release:
     runs-on: ubuntu-latest
     steps:
+    - name: Clone runtime repo
+      uses: actions/checkout@v4
     - name: Download release
       env:
         PATCH_VERSION: ${{ inputs.patch-version }}
@@ -84,4 +86,6 @@ jobs:
     - name: publish cnab bundle
       run: |
         docker pull mcr.microsoft.com/container-package-app:latest
+        cat cnab_publish.sh
+        echo """ running docker now for cnab publishing"""
         docker run -i -v /var/run/docker.sock:/var/run/docker.sock -v cnab_bundle:/data -v cnab_publish.sh:/cnab_publish.sh -eAZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }} -eAZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }} -eAZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }} -eREGISTRY_NAME=rfruntimeoffer --entrypoint "/cnab_publish.sh" mcr.microsoft.com/container-package-app:latest
