@@ -83,6 +83,19 @@ jobs:
           crane copy "${registry}/${image}:${tag}" rfruntimeoffer.azurecr.io/"${image}:${tag}"
         done <<< "$image_keys"
 
+    - name: modify registry to azure registry
+      run: |
+        image_keys=$(yq eval '.global.azure.images | keys '  $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
+        # Iterate over the images using a Bash for loop
+        while IFS= read -r image_key; do
+          # Remove "-" and extra space from the image
+          image_key=${image_key//- /}
+          echo "updating registry for ${image_key}"
+          yq eval -i ".global.azure.images.${image_key}.registry = \"rfruntimeoffer.azurecr.io\"" $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml
+        done <<< "$image_keys"
+        echo """ ***** dumping $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml ****"
+        cat $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml
+
     - name: publish cnab bundle
       run: |
         docker pull mcr.microsoft.com/container-package-app:latest
