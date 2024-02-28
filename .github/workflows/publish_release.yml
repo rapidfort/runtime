@@ -59,9 +59,9 @@ jobs:
       run: |
         REVISION=1.0.${{ inputs.patch-version }}-${{ inputs.build-number }}
         az storage blob download --account-name ${{ secrets.PRODMON_STORAGE_ACCOUNT }} --account-key ${{ secrets.PRODMON_STORAGE_KEY }} --container-name "releases" --name cnab-$REVISION.tar.gz --file cnab-$REVISION.tar.gz
-        rm -rf cnab_bundle
-        mkdir -p cnab_bundle
-        tar -xvzf cnab-$REVISION.tar.gz -C cnab_bundle
+        rm -rf $GITHUB_WORKSPACE/cnab_bundle
+        mkdir -p $GITHUB_WORKSPACE/cnab_bundle
+        tar -xvzf cnab-$REVISION.tar.gz -C $GITHUB_WORKSPACE/cnab_bundle
 
     - name: download yq
       run: |
@@ -71,15 +71,15 @@ jobs:
 
     - name: copy quay to rfruntime
       run: |
-        image_keys=$(yq eval '.global.azure.images | keys '  cnab_bundle/k8s-scanner/values.yaml)
+        image_keys=$(yq eval '.global.azure.images | keys '  $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
         # Iterate over the images using a Bash for loop
         while IFS= read -r image_key; do
           # Remove "-" and extra space from the image
           image_key=${image_key//- /}
           echo "fetching details for ${image_key}"
-          image=$(yq eval ".global.azure.images.${image_key}.image" cnab_bundle/k8s-scanner/values.yaml)
-          registry=$(yq eval ".global.azure.images.${image_key}.registry" cnab_bundle/k8s-scanner/values.yaml)
-          tag=$(yq eval ".global.azure.images.${image_key}.tag" cnab_bundle/k8s-scanner/values.yaml)
+          image=$(yq eval ".global.azure.images.${image_key}.image" $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
+          registry=$(yq eval ".global.azure.images.${image_key}.registry" $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
+          tag=$(yq eval ".global.azure.images.${image_key}.tag" $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
           crane copy "${registry}/${image}:${tag}" rfruntimeoffer.azurecr.io/"${image}:${tag}"
         done <<< "$image_keys"
 
@@ -88,4 +88,4 @@ jobs:
         docker pull mcr.microsoft.com/container-package-app:latest
         cat cnab_publish.sh
         echo """ running docker now for cnab publishing"""
-        docker run -i -v /var/run/docker.sock:/var/run/docker.sock -v cnab_bundle:/data -v $GITHUB_WORKSPACE/cnab_publish.sh:/scripts/cnab_publish.sh -eAZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }} -eAZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }} -eAZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }} -eREGISTRY_NAME=rfruntimeoffer --entrypoint "/scripts/cnab_publish.sh" mcr.microsoft.com/container-package-app:latest
+        docker run -i -v /var/run/docker.sock:/var/run/docker.sock -v $GITHUB_WORKSPACE/cnab_bundle:/data -v $GITHUB_WORKSPACE/cnab_publish.sh:/scripts/cnab_publish.sh -eAZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }} -eAZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }} -eAZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }} -eREGISTRY_NAME=rfruntimeoffer --entrypoint "/scripts/cnab_publish.sh" mcr.microsoft.com/container-package-app:latest
