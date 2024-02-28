@@ -40,6 +40,17 @@ jobs:
         files: |
           rf-cmd-darwin-arm64
           rf-cmd-linux-amd64
+
+    - name: Update latest Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: latest
+        tag_name: latest
+        body_path: CHANGELOG.md
+        files: |
+          rf-cmd-darwin-arm64
+          rf-cmd-linux-amd64
+
     - name: Install crane
       run: |
         VERSION=$(curl -s "https://api.github.com/repos/google/go-containerregistry/releases/latest" | jq -r '.tag_name')
