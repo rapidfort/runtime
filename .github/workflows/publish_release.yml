@@ -80,3 +80,17 @@ jobs:
           tag=$(yq eval ".global.azure.images.${image_key}.tag" cnab_bundle/k8s-scanner/values.yaml)
           crane copy "${registry}/${image}:${tag}" rfruntimeoffer.azurecr.io/"${image}:${tag}"
         done <<< "$image_keys"
+
+    - name: publish cnab bundle
+      run: |
+        docker pull mcr.microsoft.com/container-package-app:latest
+        docker run -it \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -v cnab_bundle:/data \
+          -v cnab_publish.sh:/cnab_publish.sh
+          -eAZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }} \
+          -eAZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }} \
+          -eAZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }} \
+          -eREGISTRY_NAME=rfruntimeoffer \
+          --entrypoint "/cnab_publish.sh" \
+          mcr.microsoft.com/container-package-app:latest
