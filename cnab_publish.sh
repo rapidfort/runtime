@@ -5,4 +5,4 @@ az acr login -n $REGISTRY_NAME
 cd /data/
 ls -l
 cpa verify
-cpa buildbundle
+cpa buildbundle --force
