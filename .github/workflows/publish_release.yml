@@ -14,12 +14,12 @@ on:
       build-number:
         description: 'Patch Version Number (1.0.22-XX)'
         required: true
-        default: '1'
+        default: '167'
         type: string
       project-for-scan:
         description: 'Project for RF scan results'
         required: false
-        default: '661'
+        default: '662'
 
 jobs:
   publish-release:
