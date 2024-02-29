@@ -89,7 +89,6 @@ jobs:
         sudo bash rfcli -p /usr/local/bin/rfcli
         rm rfcli
         echo "/usr/local/bin/rfcli" >> $GITHUB_PATH
-        cd -
 
     - name: authenticate
       env:
