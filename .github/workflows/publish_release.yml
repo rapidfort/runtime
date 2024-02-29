@@ -60,6 +60,9 @@ jobs:
         tar -zxvf go-containerregistry.tar.gz -C /usr/local/bin/ crane
         crane version
 
+    - name: docker login to quay
+      run: docker login -u=${{ secrets.RF_QUAY_USERNAME }} -p=${{ secrets.RF_QUAY_PASSWORD }} quay.io
+
     - name: crane login to quay
       run: crane auth login quay.io -u ${{ secrets.RF_QUAY_USERNAME }} -p ${{ secrets.RF_QUAY_PASSWORD }}
 
@@ -80,6 +83,22 @@ jobs:
         wget -q "$yq_url" -O /usr/local/bin/yq
         yq --version
 
+    - name: install the RapidFort CLI tools
+      run: |
+        curl -k https://us01.rapidfort.com/cli > rfcli
+        sudo bash rfcli -p /usr/local/bin/rfcli
+        rm rfcli
+        echo "/usr/local/bin/rfcli" >> $GITHUB_PATH
+        cd -
+
+    - name: authenticate
+      env:
+        RF_ROOT_URL: https://us01.rapidfort.com
+        RF_ACCESS_ID: ${{ secrets.RF_ACCESS_ID }}
+        RF_SECRET_ACCESS_KEY: ${{ secrets.RF_SECRET_ACCESS_KEY }}
+      run: |
+        rflogin
+
     - name: copy quay to rfruntime
       run: |
         image_keys=$(yq eval '.global.azure.images | keys '  $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
@@ -91,6 +110,8 @@ jobs:
           image=$(yq eval ".global.azure.images.${image_key}.image" $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
           registry=$(yq eval ".global.azure.images.${image_key}.registry" $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
           tag=$(yq eval ".global.azure.images.${image_key}.tag" $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
+          docker pull "${registry}/${image}:${tag}"
+          rfscan "${registry}/${image}:${tag}" -p 657
           crane copy "${registry}/${image}:${tag}" rfruntimeoffer.azurecr.io/"${image}:${tag}"
         done <<< "$image_keys"
 
