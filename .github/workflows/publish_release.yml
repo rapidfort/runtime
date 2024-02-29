@@ -16,6 +16,10 @@ on:
         required: true
         default: '1'
         type: string
+      project-for-scan:
+        description: 'Project for RF scan results'
+        required: false
+        default: '661'
 
 jobs:
   publish-release:
@@ -100,6 +104,8 @@ jobs:
 
     - name: copy quay to rfruntime
       run: |
+        echo "#!/bin/bash" > $GITHUB_WORKSPACE/scan_script.sh
+        chmod +x $GITHUB_WORKSPACE/scan_script.sh
         image_keys=$(yq eval '.global.azure.images | keys '  $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
         # Iterate over the images using a Bash for loop
         while IFS= read -r image_key; do
@@ -110,9 +116,12 @@ jobs:
           registry=$(yq eval ".global.azure.images.${image_key}.registry" $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
           tag=$(yq eval ".global.azure.images.${image_key}.tag" $GITHUB_WORKSPACE/cnab_bundle/k8s-scanner/values.yaml)
           docker pull "${registry}/${image}:${tag}"
-          rfscan "${registry}/${image}:${tag}" -p 657
+          echo rfscan "${registry}/${image}:${tag}" -p ${{ inputs.project-for-scan }} >> $GITHUB_WORKSPACE/scan_script.sh
           crane copy "${registry}/${image}:${tag}" rfruntimeoffer.azurecr.io/"${image}:${tag}"
         done <<< "$image_keys"
+        awk '!seen[$0]++' < $GITHUB_WORKSPACE/scan_script.sh > $GITHUB_WORKSPACE/scan_script_deduped.sh
+        chmod +x $GITHUB_WORKSPACE/scan_script_deduped.sh
+        ./$GITHUB_WORKSPACE/scan_script_deduped.sh
 
     - name: modify registry to azure registry
       run: |
