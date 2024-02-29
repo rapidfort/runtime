@@ -122,7 +122,7 @@ jobs:
         awk '!seen[$0]++' < $GITHUB_WORKSPACE/scan_script.sh > $GITHUB_WORKSPACE/scan_script_deduped.sh
         chmod +x $GITHUB_WORKSPACE/scan_script_deduped.sh
         cat $GITHUB_WORKSPACE/scan_script_deduped.sh
-        .$GITHUB_WORKSPACE/scan_script_deduped.sh
+        bash -c "$GITHUB_WORKSPACE/scan_script_deduped.sh"
 
     - name: modify registry to azure registry
       run: |
