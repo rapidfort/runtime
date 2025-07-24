@@ -140,11 +140,11 @@ download_cloud_image() {
     local img_path="$CLOUD_IMG_DIR/$img_name"
     
     if [ ! -f "$img_path" ]; then
-        print_msg $BLUE "Downloading $os_type cloud image..."
+        print_msg $BLUE "Downloading $os_type cloud image..." >&2
         wget -q --show-progress -O "$img_path" "$img_url"
-        print_msg $GREEN "Download completed!"
+        print_msg $GREEN "Download completed!" >&2
     else
-        print_msg $YELLOW "Cloud image already exists: $img_path"
+        print_msg $YELLOW "Cloud image already exists: $img_path" >&2
     fi
     
     echo "$img_path"
