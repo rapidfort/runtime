@@ -401,7 +401,7 @@ deploy_rapidfort() {
         log_error "Invalid or incomplete RapidFort credentials"
         return 1
     fi
-    
+
     # Create namespace
     kubectl create namespace rapidfort --dry-run=client -o yaml | kubectl apply -f -
     
@@ -428,11 +428,12 @@ deploy_rapidfort() {
         --set ClusterName="kubeadm" \
         --set ClusterCaption="Kubeadm Cluster" \
         --set rapidfort.credentialsSecret=rfruntime-credentials \
-        --set variant=generic \
         --set scan.enabled=true \
         --set profile.enabled=false \
-        --wait --timeout=5m
+        --set imagePullSecrets.names={rapidfort-registry-secret}
     
+    log_success "RapidFort Runtime waiting for deployment..."
+
     # Check deployment
     if kubectl rollout status daemonset/rfruntime -n rapidfort --timeout=300s; then
         log_success "RapidFort Runtime deployed successfully"
