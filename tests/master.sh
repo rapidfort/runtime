@@ -250,10 +250,9 @@ deploy_rapidfort_runtime() {
     
 
     local creds_file="$HOME/.rapidfort/credentials"
-
-    export RF_ACCESS_ID=$(awk -F'=' '/^access_id\s*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "$creds_file")
-    export RF_SECRET_ACCESS_KEY=$(awk -F'=' '/^secret_key\s*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "$creds_file")
-    export RF_ROOT_URL=$(awk -F'=' '/^rf_root_url\s*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "$creds_file")
+    export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
+    export RF_SECRET_ACCESS_KEY=$(grep "secret_key" "$creds_file" | cut -d'=' -f2 | xargs)
+    export RF_ROOT_URL=$(grep "rf_root_url" "$creds_file" | cut -d'=' -f2 | xargs)
 
     
     if [[ -z "$RF_ACCESS_ID" ]] || [[ -z "$RF_SECRET_ACCESS_KEY" ]] || [[ -z "$RF_ROOT_URL" ]]; then
