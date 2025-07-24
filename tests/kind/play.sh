@@ -260,12 +260,15 @@ deploy_rapidfort() {
         fi
     done
     
-    # Load credentials
-    source "$HOME/.rapidfort/credentials" 2>/dev/null || true
+    local creds_file="$HOME/.rapidfort/credentials"
+    export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
+    export RF_SECRET_ACCESS_KEY=$(grep "secret_key" "$creds_file" | cut -d'=' -f2 | xargs)
+    export RF_ROOT_URL=$(grep "rf_root_url" "$creds_file" | cut -d'=' -f2 | xargs)
+
     
     if [[ -z "$RF_ACCESS_ID" ]] || [[ -z "$RF_SECRET_ACCESS_KEY" ]] || [[ -z "$RF_ROOT_URL" ]]; then
         log_error "Invalid or incomplete RapidFort credentials"
-        exit 1
+        return 1
     fi
     
     # Create namespace
