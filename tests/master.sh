@@ -15,8 +15,8 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Configuration
-SUPPORTED_CLUSTERS=("kubeadm" "k0s" "k3s" "kind" "microk8s" "minikube")
+# Configuration - Added zuul to supported clusters
+SUPPORTED_CLUSTERS=("kubeadm" "k0s" "k3s" "kind" "microk8s" "minikube" "zuul")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 KUBECONFIG_PATH="$HOME/.kube/config"
 LOG_DIR="$SCRIPT_DIR/logs"
@@ -65,6 +65,7 @@ Kubernetes Cluster Management Master Script
 USAGE:
     $0 [cluster-type] [command] [options]
     $0 test-all [options]
+    $0 deploy-rapidfort [cluster-type]
     $0 help
 
 CLUSTER TYPES:
@@ -74,17 +75,19 @@ CLUSTER TYPES:
     kind       - Kubernetes in Docker
     microk8s   - Canonical MicroK8s
     minikube   - Minikube
+    zuul       - Zuul-based deployment (simulates CI/CD environment)
 
 COMMANDS:
-    install    - Install the specified cluster type
-    uninstall  - Uninstall the specified cluster type
-    status     - Show status of the specified cluster type
-    test       - Install, deploy RF runtime, run tests, then uninstall
+    install         - Install the specified cluster type
+    uninstall       - Uninstall the specified cluster type
+    status          - Show status of the specified cluster type
+    test            - Install, deploy RF runtime, run tests, then uninstall
+    deploy-rapidfort - Deploy RapidFort Runtime to existing cluster
     
 SPECIAL COMMANDS:
-    test-all   - Test all cluster types sequentially
-    list       - List all supported cluster types
-    help       - Show this help message
+    test-all        - Test all cluster types sequentially
+    list            - List all supported cluster types
+    help            - Show this help message
 
 OPTIONS:
     --skip-runtime     Skip RapidFort runtime deployment
@@ -92,10 +95,20 @@ OPTIONS:
     --keep-cluster     Don't uninstall after testing
     --log-file         Save output to log file
     --timeout          Timeout for operations (default: 600s)
+    --strict           For zuul: Apply strict security policies
 
 EXAMPLES:
     # Install k0s cluster
     $0 k0s install
+    
+    # Install zuul cluster with strict security
+    $0 zuul install --strict
+    
+    # Deploy RapidFort to existing cluster
+    $0 deploy-rapidfort
+    
+    # Deploy RapidFort to specific cluster type
+    $0 deploy-rapidfort k3s
     
     # Show status of kind cluster
     $0 kind status
@@ -164,6 +177,9 @@ run_cluster_command() {
             kubeadm)
                 # kubeadm uses RF_LOCAL_REGISTRY directly
                 ;;
+            zuul)
+                # zuul doesn't need registry-ip flag, but may need --strict
+                ;;
             k0s)
                 cmd_args+=("--registry-ip" "$RF_LOCAL_REGISTRY")
                 ;;
@@ -231,6 +247,28 @@ wait_for_pods_ready() {
 # Function to deploy RapidFort runtime
 deploy_rapidfort_runtime() {
     local cluster_type="${1:-$CURRENT_CLUSTER_TYPE}"
+    
+    # If no cluster type specified, try to detect from current context
+    if [[ -z "$cluster_type" ]]; then
+        log_info "Detecting cluster type from current context..."
+        
+        # Try to detect based on various indicators
+        if kubectl get nodes -o wide 2>/dev/null | grep -q "k0s"; then
+            cluster_type="k0s"
+        elif kubectl get nodes -o wide 2>/dev/null | grep -q "k3s"; then
+            cluster_type="k3s"
+        elif kubectl get nodes -o wide 2>/dev/null | grep -q "minikube"; then
+            cluster_type="minikube"
+        elif kubectl get nodes -o wide 2>/dev/null | grep -q "kind"; then
+            cluster_type="kind"
+        elif kubectl get nodes -o wide 2>/dev/null | grep -q "microk8s"; then
+            cluster_type="microk8s"
+        else
+            cluster_type="generic"
+        fi
+        
+        log_info "Detected cluster type: $cluster_type"
+    fi
     
     log_info "Deploying RapidFort Runtime for $cluster_type cluster..."
     
@@ -403,6 +441,12 @@ test_cluster() {
     log_info "Final cluster status:"
     run_cluster_command "$cluster_type" "status"
     
+    # For zuul, also run test-ctr command
+    if [[ "$cluster_type" == "zuul" ]]; then
+        log_info "Running zuul-specific ctr tests..."
+        run_cluster_command "$cluster_type" "test-ctr"
+    fi
+    
     # Uninstall cluster
     if [[ "$keep_cluster" != "true" ]]; then
         log_info "Uninstalling $cluster_type cluster..."
@@ -533,6 +577,7 @@ main() {
     local skip_coverage="false"
     local keep_cluster="false"
     local timeout="600"
+    local strict_mode="false"
     
     # Check for special commands first
     case "$command" in
@@ -543,6 +588,21 @@ main() {
         list)
             list_clusters
             exit 0
+            ;;
+        deploy-rapidfort)
+            shift
+            cluster_type="${1:-}"
+            
+            # Check if we have a working kubectl
+            if ! kubectl cluster-info &>/dev/null; then
+                log_error "No active Kubernetes cluster found"
+                log_info "Please ensure kubectl is configured and cluster is running"
+                exit 1
+            fi
+            
+            # Deploy RapidFort Runtime
+            deploy_rapidfort_runtime "$cluster_type"
+            exit $?
             ;;
         test-all)
             shift
@@ -591,6 +651,11 @@ main() {
             --keep-cluster) keep_cluster="true"; shift ;;
             --log-file) LOG_FILE="$2"; shift 2 ;;
             --timeout) timeout="$2"; shift 2 ;;
+            --strict) 
+                strict_mode="true"
+                extra_args+=("--strict")
+                shift 
+                ;;
             *) extra_args+=("$1"); shift ;;
         esac
     done
@@ -598,15 +663,25 @@ main() {
     # Execute command
     case "$command" in
         install|uninstall|status)
-            check_registry_ip
+            if [[ "$cluster_type" != "zuul" ]]; then
+                check_registry_ip
+            fi
             check_cluster_folder "$cluster_type" || exit 1
             export CURRENT_CLUSTER_TYPE="$cluster_type"
             run_cluster_command "$cluster_type" "$command" "${extra_args[@]}"
             ;;
         test)
-            check_registry_ip
+            if [[ "$cluster_type" != "zuul" ]]; then
+                check_registry_ip
+            fi
             export CURRENT_CLUSTER_TYPE="$cluster_type"
             test_cluster "$cluster_type" "$skip_runtime" "$skip_coverage" "$keep_cluster"
+            ;;
+        test-ctr|debug)
+            # Pass through commands for zuul
+            check_cluster_folder "$cluster_type" || exit 1
+            export CURRENT_CLUSTER_TYPE="$cluster_type"
+            run_cluster_command "$cluster_type" "$command" "${extra_args[@]}"
             ;;
         help|--help|-h)
             # Show cluster-specific help
@@ -615,7 +690,10 @@ main() {
             ;;
         *)
             log_error "Unknown command: $command"
-            log_info "Valid commands: install, uninstall, status, test, help"
+            log_info "Valid commands: install, uninstall, status, test, deploy-rapidfort, help"
+            if [[ "$cluster_type" == "zuul" ]]; then
+                log_info "Zuul-specific commands: test-ctr, debug"
+            fi
             exit 1
             ;;
     esac
