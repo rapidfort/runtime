@@ -248,8 +248,13 @@ deploy_rapidfort_runtime() {
         return 1
     fi
     
-    # Load credentials
-    source "$HOME/.rapidfort/credentials" 2>/dev/null || true
+
+    local creds_file="${1:-$HOME/.rapidfort/credentials}"
+
+    export RF_ACCESS_ID=$(awk -F'=' '/^access_id\s*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "$creds_file")
+    export RF_SECRET_ACCESS_KEY=$(awk -F'=' '/^secret_key\s*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "$creds_file")
+    export RF_ROOT_URL=$(awk -F'=' '/^rf_root_url\s*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "$creds_file")
+
     
     if [[ -z "$RF_ACCESS_ID" ]] || [[ -z "$RF_SECRET_ACCESS_KEY" ]] || [[ -z "$RF_ROOT_URL" ]]; then
         log_error "Invalid or incomplete RapidFort credentials"
