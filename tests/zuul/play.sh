@@ -89,8 +89,11 @@ create_zuul_user() {
     
     if ! id "$ZUUL_USER" &>/dev/null; then
         useradd -m -s /bin/bash "$ZUUL_USER"
-        usermod -aG docker "$ZUUL_USER" 2>/dev/null || true
     fi
+    
+    # Create docker group if it doesn't exist and add zuul to it
+    getent group docker >/dev/null 2>&1 || groupadd docker
+    usermod -aG docker "$ZUUL_USER" 2>/dev/null || true
     
     # Create restricted sudoers entry
     cat > /etc/sudoers.d/zuul << EOF
@@ -135,6 +138,30 @@ install_containerd() {
     apt-get install -y containerd.io=${CONTAINERD_VERSION}-1
     
     log_success "Containerd ${CONTAINERD_VERSION} installed"
+    
+    # Install crictl
+    log_info "Installing crictl..."
+    VERSION="v1.28.0"
+    curl -L -o crictl-${VERSION}-linux-amd64.tar.gz \
+        https://github.com/kubernetes-sigs/cri-tools/releases/download/${VERSION}/crictl-${VERSION}-linux-amd64.tar.gz
+    tar zxf crictl-${VERSION}-linux-amd64.tar.gz
+    mv crictl /usr/local/bin/
+    rm -f crictl-${VERSION}-linux-amd64.tar.gz
+    
+    # Create crictl configuration
+    cat > /etc/crictl.yaml << EOF
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint: unix:///run/containerd/containerd.sock
+timeout: 10
+debug: false
+EOF
+    
+    log_success "crictl installed"
+    
+    # Ensure ctr is in PATH
+    if [[ ! -f /usr/local/bin/ctr ]]; then
+        ln -s /usr/bin/ctr /usr/local/bin/ctr 2>/dev/null || true
+    fi
 }
 
 # Function to configure containerd with Zuul restrictions
@@ -247,6 +274,11 @@ EOF
     mkdir -p /etc/containerd/certs.d
     
     # Set restrictive permissions on containerd socket
+    mkdir -p /etc/systemd/system/containerd.service.d
+    
+    # Create docker group if it doesn't exist
+    getent group docker >/dev/null 2>&1 || groupadd docker
+    
     cat > /etc/systemd/system/containerd.service.d/override.conf << EOF
 [Service]
 ExecStartPost=/bin/bash -c 'sleep 2 && chmod 660 /run/containerd/containerd.sock && chgrp docker /run/containerd/containerd.sock'
@@ -380,6 +412,7 @@ install_kubernetes() {
     apt-mark hold kubelet kubeadm kubectl
     
     # Configure kubelet for containerd
+    mkdir -p /etc/systemd/system/kubelet.service.d
     cat > /etc/systemd/system/kubelet.service.d/0-containerd.conf << EOF
 [Service]
 Environment="KUBELET_EXTRA_ARGS=--container-runtime-endpoint=unix:///run/containerd/containerd.sock"
@@ -410,6 +443,15 @@ net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
 EOF
     sysctl --system
+    
+    # Install CNI plugins
+    log_info "Installing CNI plugins..."
+    mkdir -p /opt/cni/bin /etc/cni/net.d
+    CNI_VERSION="v1.3.0"
+    curl -L -o cni-plugins.tgz \
+        https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-amd64-${CNI_VERSION}.tgz
+    tar -C /opt/cni/bin -xzf cni-plugins.tgz
+    rm -f cni-plugins.tgz
     
     # Initialize with specific configuration
     cat > /tmp/kubeadm-config.yaml << EOF
@@ -475,13 +517,25 @@ test_ctr_operations() {
     log_info "Testing mount operations..."
     mkdir -p /tmp/ctr-mount-test
     
+    # First create a snapshot
+    log_info "Creating snapshot..."
+    ctr snapshot prepare test-snapshot alpine:latest 2>&1 || log_error "Failed to prepare snapshot"
+    
     # Try to mount image
-    if ctr snapshot mounts /tmp/ctr-mount-test alpine:latest; then
+    log_info "Attempting mount operation..."
+    if ctr snapshot mounts /tmp/ctr-mount-test test-snapshot 2>&1; then
         log_success "Mount operation succeeded as root"
+        # Show what was mounted
+        ls -la /tmp/ctr-mount-test/ | head -5
         umount /tmp/ctr-mount-test 2>/dev/null || true
     else
         log_error "Mount operation failed as root"
+        log_info "Error details:"
+        ctr snapshot mounts /tmp/ctr-mount-test test-snapshot 2>&1 || true
     fi
+    
+    # Clean up snapshot
+    ctr snapshot rm test-snapshot 2>/dev/null || true
     
     # Test as zuul user
     log_info "Testing ctr as zuul user..."
@@ -492,11 +546,42 @@ test_ctr_operations() {
     ctr -n zuul-ci image pull docker.io/library/alpine:latest || log_error "Failed to pull in zuul-ci namespace"
     
     # Test mount in namespace
-    if ctr -n zuul-ci snapshot mounts /tmp/ctr-mount-test alpine:latest; then
+    log_info "Creating snapshot in zuul-ci namespace..."
+    ctr -n zuul-ci snapshot prepare test-snapshot-ns alpine:latest 2>&1 || log_error "Failed to prepare snapshot in namespace"
+    
+    log_info "Attempting mount operation in zuul-ci namespace..."
+    if ctr -n zuul-ci snapshot mounts /tmp/ctr-mount-test test-snapshot-ns 2>&1; then
         log_success "Mount operation succeeded in zuul-ci namespace"
         umount /tmp/ctr-mount-test 2>/dev/null || true
     else
         log_error "Mount operation failed in zuul-ci namespace"
+        log_info "Error details:"
+        ctr -n zuul-ci snapshot mounts /tmp/ctr-mount-test test-snapshot-ns 2>&1 || true
+    fi
+    
+    # Clean up
+    ctr -n zuul-ci snapshot rm test-snapshot-ns 2>/dev/null || true
+    
+    # Test RapidFort-like operations
+    log_info "Testing RapidFort-like layer extraction..."
+    
+    # Export image to tar
+    log_info "Exporting image..."
+    if ctr image export /tmp/alpine-test.tar alpine:latest 2>&1; then
+        log_success "Image export succeeded"
+        ls -lh /tmp/alpine-test.tar
+        rm -f /tmp/alpine-test.tar
+    else
+        log_error "Image export failed"
+    fi
+    
+    # Test snapshot view
+    log_info "Testing snapshot view operations..."
+    if ctr snapshot view test-view alpine:latest 2>&1; then
+        log_success "Snapshot view created"
+        ctr snapshot rm test-view 2>/dev/null || true
+    else
+        log_error "Snapshot view failed"
     fi
     
     # Check permissions
@@ -552,6 +637,11 @@ show_status() {
 show_debug() {
     log_header "Debug Information"
     
+    # Environment variables
+    log_info "Zuul-related environment variables:"
+    env | grep -i zuul || echo "  No ZUUL variables found"
+    env | grep -i container || echo "  No CONTAINER variables found"
+    
     # Containerd logs
     log_info "Recent containerd logs:"
     journalctl -u containerd -n 50 --no-pager
@@ -581,7 +671,44 @@ show_debug() {
     
     # Kernel capabilities
     log_info "Kernel capabilities:"
-    capsh --print
+    capsh --print 2>/dev/null || log_warning "capsh not available"
+    
+    # Containerd config
+    log_info "Containerd configuration:"
+    cat /etc/containerd/config.toml 2>/dev/null | head -50 || log_warning "No containerd config found"
+    
+    # Check containerd plugins
+    log_info "Containerd plugins:"
+    ctr plugins ls 2>/dev/null || log_warning "Cannot list plugins"
+    
+    # File permissions
+    log_info "Important file permissions:"
+    ls -la /run/containerd/ 2>/dev/null || true
+    ls -la /var/lib/containerd/ 2>/dev/null | head -10 || true
+    
+    # Test running container with ctr
+    log_info "Testing container run with ctr:"
+    ctr run --rm alpine:latest test-container echo "Hello from container" 2>&1 || log_error "Failed to run container"
+    
+    # Test specific mount scenarios that might fail in Zuul
+    log_info "Testing specific mount failure scenarios..."
+    
+    # Test 1: Direct layer mount
+    log_info "Test 1: Direct layer mount"
+    LAYER_DIGEST=$(ctr image ls -q | xargs ctr image manifest | grep -m1 'digest:' | awk '{print $2}' | tr -d '"' 2>/dev/null || echo "")
+    if [[ -n "$LAYER_DIGEST" ]]; then
+        ctr snapshot mounts /tmp/layer-test "$LAYER_DIGEST" 2>&1 || log_warning "Direct layer mount failed (expected in restricted env)"
+    fi
+    
+    # Test 2: Rootless mount attempt
+    log_info "Test 2: Testing as non-root (zuul) user"
+    su - $ZUUL_USER -c "ctr image ls" 2>&1 || log_warning "Non-root ctr access failed"
+    
+    # Test 3: Check for mount restrictions
+    log_info "Test 3: Checking mount capabilities"
+    if command -v capsh &>/dev/null; then
+        capsh --print | grep -i cap_sys_admin || log_warning "CAP_SYS_ADMIN not available"
+    fi
 }
 
 # Main installation function
@@ -618,10 +745,28 @@ install_all() {
     initialize_cluster
     
     # Install CNI
-    log_info "Installing Calico CNI..."
-    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml
-    sleep 30
-    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml
+    log_info "Installing Calico CNI (v3.26.0 for compatibility)..."
+    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/tigera-operator.yaml
+    
+    # Wait for operator CRDs to be ready
+    log_info "Waiting for Tigera operator..."
+    kubectl wait --for=condition=Available deployment/tigera-operator -n tigera-operator --timeout=300s
+    
+    # Apply Calico configuration
+    cat << 'CALICO_EOF' | kubectl create -f -
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  calicoNetwork:
+    ipPools:
+    - blockSize: 26
+      cidr: 10.244.0.0/16
+      encapsulation: VXLANCrossSubnet
+      natOutgoing: Enabled
+      nodeSelector: all()
+CALICO_EOF
     
     # Wait for cluster
     log_info "Waiting for cluster to be ready..."
