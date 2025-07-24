@@ -744,29 +744,18 @@ install_all() {
     # Initialize cluster
     initialize_cluster
     
-    # Install CNI
-    log_info "Installing Calico CNI (v3.26.0 for compatibility)..."
-    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/tigera-operator.yaml
+    # Install CNI (Using Weave Net to avoid Calico CRD issues)
+    log_info "Installing Weave Net CNI..."
     
-    # Wait for operator CRDs to be ready
-    log_info "Waiting for Tigera operator..."
-    kubectl wait --for=condition=Available deployment/tigera-operator -n tigera-operator --timeout=300s
+    # Ensure bridge netfilter is enabled
+    sysctl net.bridge.bridge-nf-call-iptables=1 || true
     
-    # Apply Calico configuration
-    cat << 'CALICO_EOF' | kubectl create -f -
-apiVersion: operator.tigera.io/v1
-kind: Installation
-metadata:
-  name: default
-spec:
-  calicoNetwork:
-    ipPools:
-    - blockSize: 26
-      cidr: 10.244.0.0/16
-      encapsulation: VXLANCrossSubnet
-      natOutgoing: Enabled
-      nodeSelector: all()
-CALICO_EOF
+    # Install Weave Net
+    kubectl apply -f https://github.com/weaveworks/weave/releases/download/v2.8.1/weave-daemonset-k8s.yaml
+    
+    # Wait for Weave Net to be ready
+    log_info "Waiting for CNI to be ready..."
+    kubectl wait --for=condition=ready pod -n kube-system -l name=weave-net --timeout=300s || log_warning "CNI taking longer to start"
     
     # Wait for cluster
     log_info "Waiting for cluster to be ready..."
