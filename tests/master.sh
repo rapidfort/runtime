@@ -249,7 +249,7 @@ deploy_rapidfort_runtime() {
     fi
     
 
-    local creds_file="${1:-$HOME/.rapidfort/credentials}"
+    local creds_file="$HOME/.rapidfort/credentials"
 
     export RF_ACCESS_ID=$(awk -F'=' '/^access_id\s*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "$creds_file")
     export RF_SECRET_ACCESS_KEY=$(awk -F'=' '/^secret_key\s*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' "$creds_file")
