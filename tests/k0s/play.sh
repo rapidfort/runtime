@@ -635,7 +635,7 @@ deploy_rapidfort() {
     else
         # Add imagePullSecrets for quay.io
         if [[ -f "$registry_secret_path" ]]; then
-            helm_args+=("--set" "imagePullSecrets[0].name=rapidfort-registry-secret")
+            helm_args+=("--set" "imagePullSecrets[0].name={rapidfort-registry-secret}")
         fi
     fi
     
