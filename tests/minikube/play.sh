@@ -3,6 +3,13 @@
 # Minikube Installation and Management Script
 # Usage: ./play.sh [install|uninstall|status|help]
 
+# Source common architecture detection
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../common-arch.sh" || {
+    echo "Error: common-arch.sh not found"
+    exit 1
+}
+
 set -e
 
 # Colors for output
@@ -141,11 +148,11 @@ install_crictl() {
     VERSION="v1.28.0"
     
     # Download crictl
-    curl -L -o crictl-${VERSION}-linux-amd64.tar.gz \
-        https://github.com/kubernetes-sigs/cri-tools/releases/download/${VERSION}/crictl-${VERSION}-linux-amd64.tar.gz
+    curl -L -o crictl-${VERSION}-linux-$(get_k8s_arch).tar.gz \
+        https://github.com/kubernetes-sigs/cri-tools/releases/download/${VERSION}/crictl-${VERSION}-linux-$(get_k8s_arch).tar.gz
     
     # Extract and install
-    tar zxf crictl-${VERSION}-linux-amd64.tar.gz
+    tar zxf crictl-${VERSION}-linux-$(get_k8s_arch).tar.gz
     
     if is_root; then
         mv crictl /usr/local/bin/
@@ -154,7 +161,7 @@ install_crictl() {
     fi
     
     # Clean up
-    rm -f crictl-${VERSION}-linux-amd64.tar.gz
+    rm -f crictl-${VERSION}-linux-$(get_k8s_arch).tar.gz
     
     # Create crictl configuration with more compatible settings
     mkdir -p /etc
@@ -185,7 +192,7 @@ install_cni_plugins() {
     
     # Download and install CNI plugins
     curl -L -o cni-plugins.tgz \
-        https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-amd64-${CNI_VERSION}.tgz
+        https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-$(get_cni_arch)-${CNI_VERSION}.tgz
     
     tar -C /opt/cni/bin -xzf cni-plugins.tgz
     rm -f cni-plugins.tgz
@@ -488,13 +495,13 @@ install_minikube_binary() {
     log_info "Installing Minikube binary..."
 
     # Download minikube binary
-    curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-    chmod +x minikube-linux-amd64
+    curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-$(get_k8s_arch)
+    chmod +x minikube-linux-$(get_k8s_arch)
     
     if is_root; then
-        mv minikube-linux-amd64 /usr/local/bin/minikube
+        mv minikube-linux-$(get_k8s_arch) /usr/local/bin/minikube
     else
-        sudo mv minikube-linux-amd64 /usr/local/bin/minikube
+        sudo mv minikube-linux-$(get_k8s_arch) /usr/local/bin/minikube
     fi
 
     log_success "Minikube binary installed"
@@ -507,7 +514,7 @@ install_kubectl() {
     fi
     
     log_info "Installing kubectl..."
-    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/$(get_k8s_arch)/kubectl"
     chmod +x kubectl
     
     if is_root; then

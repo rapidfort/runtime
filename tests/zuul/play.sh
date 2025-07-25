@@ -4,6 +4,13 @@
 # Simulates a Zuul CI/CD environment with restricted containerd configuration
 # Usage: ./play.sh [install|uninstall|status|debug|help]
 
+# Source common architecture detection
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../common-arch.sh" || {
+    echo "Error: common-arch.sh not found"
+    exit 1
+}
+
 set -e
 
 # Colors for output
@@ -220,11 +227,11 @@ install_containerd() {
     # Install crictl
     log_info "Installing crictl..."
     VERSION="v1.28.0"
-    curl -L -o crictl-${VERSION}-linux-amd64.tar.gz \
-        https://github.com/kubernetes-sigs/cri-tools/releases/download/${VERSION}/crictl-${VERSION}-linux-amd64.tar.gz
-    tar zxf crictl-${VERSION}-linux-amd64.tar.gz
+    curl -L -o crictl-${VERSION}-linux-$(get_k8s_arch).tar.gz \
+        https://github.com/kubernetes-sigs/cri-tools/releases/download/${VERSION}/crictl-${VERSION}-linux-$(get_k8s_arch).tar.gz
+    tar zxf crictl-${VERSION}-linux-$(get_k8s_arch).tar.gz
     mv crictl /usr/local/bin/
-    rm -f crictl-${VERSION}-linux-amd64.tar.gz
+    rm -f crictl-${VERSION}-linux-$(get_k8s_arch).tar.gz
     
     # Create crictl configuration
     cat > /etc/crictl.yaml << EOF
@@ -329,7 +336,7 @@ disabled_plugins = []
       shim_debug = false
     
     [plugins."io.containerd.runtime.v2.task"]
-      platforms = ["linux/amd64"]
+      platforms = ["$(get_docker_platform)"]
     
     # Content sharing policy (restricted)
     [plugins."io.containerd.content.v1.content"]
@@ -529,7 +536,7 @@ EOF
     mkdir -p /opt/cni/bin /etc/cni/net.d
     CNI_VERSION="v1.3.0"
     curl -L -o cni-plugins.tgz \
-        https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-amd64-${CNI_VERSION}.tgz
+        https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-$(get_cni_arch)-${CNI_VERSION}.tgz
     tar -C /opt/cni/bin -xzf cni-plugins.tgz
     rm -f cni-plugins.tgz
     

@@ -3,6 +3,13 @@
 # MicroK8s Installation and Management Script
 # Usage: ./play.sh [install|uninstall|status|help]
 
+# Source common architecture detection
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../common-arch.sh" || {
+    echo "Error: common-arch.sh not found"
+    exit 1
+}
+
 set -e
 
 # Colors for output

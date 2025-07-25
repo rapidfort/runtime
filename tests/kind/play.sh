@@ -3,6 +3,13 @@
 # Kind Installation and Management Script
 # Usage: ./play.sh [install|uninstall|status|help]
 
+# Source common architecture detection
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../common-arch.sh" || {
+    echo "Error: common-arch.sh not found"
+    exit 1
+}
+
 set -e
 
 # Colors for output
@@ -244,7 +251,7 @@ install_kind_binary() {
     log_info "Installing Kind binary..."
     
     # Download kind binary
-    curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+    curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-$(get_k8s_arch)
     chmod +x ./kind
     mv ./kind /usr/local/bin/kind
     

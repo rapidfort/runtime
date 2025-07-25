@@ -4,6 +4,13 @@
 # Supports single-node and multi-node clusters
 # Usage: ./play.sh [command] [options]
 
+# Source common architecture detection
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../common-arch.sh" || {
+    echo "Error: common-arch.sh not found"
+    exit 1
+}
+
 set -e
 
 # Script configuration
@@ -236,7 +243,7 @@ install_container_runtime() {
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
         
         # Add Docker repository
-        add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+        add-apt-repository "deb [arch=$(get_docker_repo_arch)] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
         
         apt-get update
         apt-get install -y containerd.io
