@@ -567,11 +567,12 @@ verify_containerd_cri() {
 
 # Function to deploy RapidFort Runtime
 deploy_rapidfort() {
-    log_info "Deploying RapidFort Runtime to Minikube cluster"
+    log_info "Deploying RapidFort Runtime to [CLUSTER_TYPE] cluster"
     
-    # Check if minikube is running
-    if ! is_minikube_running; then
-        log_error "Minikube cluster is not running. Install minikube first with: $0 install"
+    # Check if [CLUSTER_TYPE] is running
+    # NOTE: Replace this check with cluster-specific logic
+    if ! [CLUSTER_RUNNING_CHECK]; then
+        log_error "[CLUSTER_TYPE] is not running. Install [CLUSTER_TYPE] first with: $0 install"
         exit 1
     fi
     
@@ -588,21 +589,13 @@ deploy_rapidfort() {
         exit 1
     fi
     
-    # Look for registry secret in multiple locations
-    local registry_secret_path=""
-    local possible_paths=(
-        "./rapidfort-registry-secret.yaml"
-        "../rapidfort-registry-secret.yaml"
-        "../../rapidfort-registry-secret.yaml"
-        "$HOME/rapidfort-registry-secret.yaml"
-    )
-    
-    for path in "${possible_paths[@]}"; do
-        if [[ -f "$path" ]]; then
-            registry_secret_path="$path"
-            break
-        fi
-    done
+    # Check for registry secret - MUST exist
+    local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
+    if [[ ! -f "$registry_secret_path" ]]; then
+        log_error "Registry secret not found at: $registry_secret_path"
+        log_error "This file is required for RapidFort Runtime deployment"
+        exit 1
+    fi
     
     local creds_file="$HOME/.rapidfort/credentials"
     export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
@@ -612,7 +605,7 @@ deploy_rapidfort() {
     
     if [[ -z "$RF_ACCESS_ID" ]] || [[ -z "$RF_SECRET_ACCESS_KEY" ]] || [[ -z "$RF_ROOT_URL" ]]; then
         log_error "Invalid or incomplete RapidFort credentials"
-        return 1
+        exit 1
     fi
     
     # Create namespace
@@ -626,24 +619,26 @@ deploy_rapidfort() {
         --from-literal=RF_ROOT_URL="$RF_ROOT_URL" \
         --dry-run=client -o yaml | kubectl apply -f -
     
-    # Apply registry secret if found
-    if [[ -n "$registry_secret_path" ]]; then
-        kubectl apply -f "$registry_secret_path" -n rapidfort
-    else
-        log_warning "rapidfort-registry-secret.yaml not found in any standard location"
-        log_info "Proceeding without registry secret..."
-    fi
+    # Apply registry secret
+    kubectl apply -f "$registry_secret_path" -n rapidfort
     
     # Deploy RapidFort Runtime
     log_info "Installing RapidFort Runtime with Helm..."
+    
+    # NOTE: Adjust variant based on cluster type
+    # k0s -> variant="k0s"
+    # k3s -> variant="k3s"
+    # others -> variant="generic"
+    
     helm upgrade --install rfruntime oci://quay.io/rapidfort/runtime \
         --namespace rapidfort \
-        --set ClusterName="minikube" \
-        --set ClusterCaption="Minikube Cluster" \
+        --set ClusterName="[CLUSTER_TYPE]" \
+        --set ClusterCaption="[CLUSTER_TYPE] Cluster" \
         --set rapidfort.credentialsSecret=rfruntime-credentials \
-        --set variant=generic \
+        --set variant="[VARIANT]" \
         --set scan.enabled=true \
         --set profile.enabled=false \
+        --set 'imagePullSecrets[0].name=rapidfort-registry-secret' \
         --wait --timeout=5m
     
     # Check deployment
@@ -658,7 +653,6 @@ deploy_rapidfort() {
         exit 1
     fi
 }
-
 # Function to install everything
 install_all() {
     local registry_ip="$1"

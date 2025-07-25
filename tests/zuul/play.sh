@@ -770,14 +770,12 @@ show_debug() {
 
 # Function to deploy RapidFort Runtime
 deploy_rapidfort() {
-    log_info "Deploying RapidFort Runtime to Zuul Kubernetes cluster"
+    log_info "Deploying RapidFort Runtime to [CLUSTER_TYPE] cluster"
     
-    # Ensure KUBECONFIG is set
-    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
-    
-    # Check if cluster is running
-    if ! kubectl cluster-info &>/dev/null; then
-        log_error "Kubernetes cluster is not running. Install first with: $0 install"
+    # Check if [CLUSTER_TYPE] is running
+    # NOTE: Replace this check with cluster-specific logic
+    if ! [CLUSTER_RUNNING_CHECK]; then
+        log_error "[CLUSTER_TYPE] is not running. Install [CLUSTER_TYPE] first with: $0 install"
         exit 1
     fi
     
@@ -794,30 +792,22 @@ deploy_rapidfort() {
         exit 1
     fi
     
-    # Load credentials
-    source "$HOME/.rapidfort/credentials" 2>/dev/null || true
+    # Check for registry secret - MUST exist
+    local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
+    if [[ ! -f "$registry_secret_path" ]]; then
+        log_error "Registry secret not found at: $registry_secret_path"
+        log_error "This file is required for RapidFort Runtime deployment"
+        exit 1
+    fi
     
-    # Check for alternate credential format
-    if [[ -z "$RF_ACCESS_ID" ]]; then
-        RF_ACCESS_ID=$(grep -E "^access_id\s*=" "$HOME/.rapidfort/credentials" 2>/dev/null | cut -d'=' -f2- | xargs)
-    fi
-    if [[ -z "$RF_SECRET_ACCESS_KEY" ]]; then
-        RF_SECRET_ACCESS_KEY=$(grep -E "^secret_key\s*=" "$HOME/.rapidfort/credentials" 2>/dev/null | cut -d'=' -f2- | xargs)
-    fi
-    if [[ -z "$RF_ROOT_URL" ]]; then
-        RF_ROOT_URL=$(grep -E "^rf_root_url\s*=" "$HOME/.rapidfort/credentials" 2>/dev/null | cut -d'=' -f2- | xargs)
-    fi
+    local creds_file="$HOME/.rapidfort/credentials"
+    export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
+    export RF_SECRET_ACCESS_KEY=$(grep "secret_key" "$creds_file" | cut -d'=' -f2 | xargs)
+    export RF_ROOT_URL=$(grep "rf_root_url" "$creds_file" | cut -d'=' -f2 | xargs)
+
     
     if [[ -z "$RF_ACCESS_ID" ]] || [[ -z "$RF_SECRET_ACCESS_KEY" ]] || [[ -z "$RF_ROOT_URL" ]]; then
         log_error "Invalid or incomplete RapidFort credentials"
-        log_info "Expected format in ~/.rapidfort/credentials:"
-        echo "  RF_ACCESS_ID=your-access-id"
-        echo "  RF_SECRET_ACCESS_KEY=your-secret-key"
-        echo "  RF_ROOT_URL=https://your-rapidfort-url"
-        echo "  OR"
-        echo "  access_id = your-access-id"
-        echo "  secret_key = your-secret-key"
-        echo "  rf_root_url = https://your-rapidfort-url"
         exit 1
     fi
     
@@ -831,48 +821,39 @@ deploy_rapidfort() {
         --from-literal=RF_SECRET_ACCESS_KEY="$RF_SECRET_ACCESS_KEY" \
         --from-literal=RF_ROOT_URL="$RF_ROOT_URL" \
         --dry-run=client -o yaml | kubectl apply -f -
-
-    kubectl apply -f ${HOME}/rapidfort-registry-secret.yaml -n rapidfort
-
+    
+    # Apply registry secret
+    kubectl apply -f "$registry_secret_path" -n rapidfort
+    
     # Deploy RapidFort Runtime
     log_info "Installing RapidFort Runtime with Helm..."
     
-    # Build helm command
-    local helm_args=(
-        "upgrade" "--install" "rfruntime"
-        "oci://quay.io/rapidfort/runtime"
-        "--namespace" "rapidfort"
-        "--set" "ClusterName=zuul-cluster"
-        "--set" "ClusterCaption=Zuul Kubernetes Cluster"
-        "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
-        "--set" "scan.enabled=true"
-        "--set" "profile.enabled=false"
-        "--set" 'imagePullSecrets.names={rapidfort-registry-secret}'
-        "--wait" "--timeout=5m"
-    )
+    # NOTE: Adjust variant based on cluster type
+    # k0s -> variant="k0s"
+    # k3s -> variant="k3s"
+    # others -> variant="generic"
     
-    helm "${helm_args[@]}"
+    helm upgrade --install rfruntime oci://quay.io/rapidfort/runtime \
+        --namespace rapidfort \
+        --set ClusterName="[CLUSTER_TYPE]" \
+        --set ClusterCaption="[CLUSTER_TYPE] Cluster" \
+        --set rapidfort.credentialsSecret=rfruntime-credentials \
+        --set variant="[VARIANT]" \
+        --set scan.enabled=true \
+        --set profile.enabled=false \
+        --set 'imagePullSecrets[0].name=rapidfort-registry-secret' \
+        --wait --timeout=5m
     
     # Check deployment
-    if kubectl rollout status daemonset/rfruntime -n rapidfort --timeout=300s &>/dev/null; then
+    if kubectl rollout status daemonset/rfruntime -n rapidfort --timeout=300s; then
         log_success "RapidFort Runtime deployed successfully"
         echo ""
-        echo "RapidFort Runtime Commands:"
+        echo "Commands:"
         echo "  # Check logs: kubectl logs -n rapidfort -l app=rfruntime -c sentry -f"
         echo "  # Check scan results: rfjobs"
-        echo ""
-        echo "To set up rfjobs command (if not already available):"
-        echo "  echo 'alias rfjobs=\"kubectl logs -n rapidfort -l app=rfruntime -c sentry | grep -E \\\"(PASSED|FAILED|SCAN_COMPLETED|ERROR)\\\" | tail -20\"' >> ~/.bashrc"
-        echo "  source ~/.bashrc"
-        echo ""
-        echo "To test containerd issues with RapidFort:"
-        echo "  # Run: $0 test-ctr"
     else
-        log_warning "RapidFort Runtime deployment may need more time"
-        echo ""
-        echo "Check deployment status:"
-        echo "  kubectl get pods -n rapidfort"
-        echo "  kubectl describe pods -n rapidfort"
+        log_error "RapidFort Runtime deployment failed"
+        exit 1
     fi
 }
 

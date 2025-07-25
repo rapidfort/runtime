@@ -286,6 +286,14 @@ deploy_rapidfort_runtime() {
         return 1
     fi
     
+    # Check for registry secret - MUST exist
+    local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
+    if [[ ! -f "$registry_secret_path" ]]; then
+        log_error "Registry secret not found at: $registry_secret_path"
+        log_error "This file is required for RapidFort Runtime deployment"
+        return 1
+    fi
+    
 
     local creds_file="$HOME/.rapidfort/credentials"
     export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
@@ -309,18 +317,8 @@ deploy_rapidfort_runtime() {
         --from-literal=RF_ROOT_URL="$RF_ROOT_URL" \
         --dry-run=client -o yaml | kubectl apply -f -
     
-    # Check for registry secret
-    local registry_secret_path="$SCRIPT_DIR/rapidfort-registry-secret.yaml"
-    if [[ ! -f "$registry_secret_path" ]]; then
-        # Try parent directory
-        registry_secret_path="$SCRIPT_DIR/../rapidfort-registry-secret.yaml"
-    fi
-    
-    if [[ -f "$registry_secret_path" ]]; then
-        kubectl apply -f "$registry_secret_path" -n rapidfort
-    else
-        log_warning "rapidfort-registry-secret.yaml not found, proceeding without it"
-    fi
+    # Apply registry secret
+    kubectl apply -f "$registry_secret_path" -n rapidfort
     
     # Install RapidFort Runtime with Helm
     log_info "Installing RapidFort Runtime with Helm..."
@@ -336,6 +334,7 @@ deploy_rapidfort_runtime() {
     # Cluster name is just the type
     local cluster_name="$cluster_type"
     
+    # Always set imagePullSecrets
     helm upgrade --install rfruntime oci://quay.io/rapidfort/runtime \
         --namespace rapidfort \
         --set ClusterName="$cluster_name" \
@@ -344,6 +343,7 @@ deploy_rapidfort_runtime() {
         --set variant="$variant" \
         --set scan.enabled=true \
         --set profile.enabled=false \
+        --set 'imagePullSecrets[0].name=rapidfort-registry-secret' \
         --wait --timeout=5m
     
     # Wait for RapidFort pods to be ready
@@ -362,7 +362,6 @@ deploy_rapidfort_runtime() {
         return 1
     fi
 }
-
 # Function to run coverage test
 run_coverage_test() {
     log_info "Running coverage test..."
