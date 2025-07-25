@@ -42,6 +42,34 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Function to detect system architecture
+get_system_arch() {
+    local arch=""
+    local machine=$(uname -m)
+    
+    case $machine in
+        x86_64|amd64)
+            arch="amd64"
+            ;;
+        aarch64|arm64)
+            arch="arm64"
+            ;;
+        armv7l|armhf|armv7)
+            arch="arm"
+            ;;
+        i386|i686)
+            arch="386"
+            ;;
+        *)
+            log_error "Unsupported architecture: $machine"
+            log_info "Supported architectures: amd64, arm64, arm, 386"
+            exit 1
+            ;;
+    esac
+    
+    echo "$arch"
+}
+
 # Function to detect host IP if RF_LOCAL_REGISTRY not set
 detect_host_ip() {
     local host_ip=""
@@ -131,6 +159,10 @@ check_requirements() {
         log_error "This script only supports Linux"
         exit 1
     fi
+
+    # Check architecture
+    local arch=$(get_system_arch)
+    log_info "System architecture: $(uname -m) -> $arch"
 
     # Check if running as root or with sudo
     if [[ $EUID -ne 0 ]]; then
@@ -381,6 +413,7 @@ show_debug() {
     log_info "System Information:"
     echo "  OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
     echo "  Kernel: $(uname -r)"
+    echo "  Architecture: $(uname -m) ($(get_system_arch))"
     echo "  CPUs: $(nproc)"
     echo "  Memory: $(free -h | grep Mem | awk '{print $2}')"
     echo "  Disk: $(df -h / | tail -1 | awk '{print $4}' ) free"
@@ -714,9 +747,49 @@ install_all() {
     # Create k0s configuration
     create_k0s_config "$registry_ip"
     
-    # Install k0s
+    # Install k0s with multiple fallback methods
     log_info "Installing k0s version $K0S_VERSION..."
-    curl -sSLf https://get.k0s.sh | K0S_VERSION="$K0S_VERSION" sh
+    
+    # Detect system architecture
+    local arch=$(get_system_arch)
+    log_info "System architecture: $arch"
+    
+    # Method 1: Try get.k0s.sh script
+    if curl -sSLf https://get.k0s.sh --connect-timeout 10 | K0S_VERSION="$K0S_VERSION" sh 2>/dev/null; then
+        log_success "k0s installed via get.k0s.sh"
+    else
+        log_warning "Installation via get.k0s.sh failed, trying direct download..."
+        
+        # Method 2: Direct download from GitHub
+        local k0s_url="https://github.com/k0sproject/k0s/releases/download/${K0S_VERSION}/k0s-${K0S_VERSION}-${arch}"
+        log_info "Downloading from: $k0s_url"
+        
+        if curl -sSLf -o /tmp/k0s "$k0s_url" --connect-timeout 30; then
+            chmod +x /tmp/k0s
+            mv /tmp/k0s "$K0S_BINARY"
+            log_success "k0s binary installed from GitHub"
+        else
+            # Method 3: Try with wget
+            log_warning "curl failed, trying wget..."
+            if command -v wget &> /dev/null; then
+                if wget -q -O /tmp/k0s "$k0s_url" --timeout=30; then
+                    chmod +x /tmp/k0s
+                    mv /tmp/k0s "$K0S_BINARY"
+                    log_success "k0s binary installed with wget"
+                else
+                    log_error "All download methods failed"
+                    log_info "Manual installation required:"
+                    echo "  1. Download k0s from: $k0s_url"
+                    echo "  2. Copy to: $K0S_BINARY"
+                    echo "  3. Make executable: chmod +x $K0S_BINARY"
+                    exit 1
+                fi
+            else
+                log_error "wget not available and curl failed"
+                exit 1
+            fi
+        fi
+    fi
     
     if ! is_k0s_installed; then
         log_error "k0s installation failed"
