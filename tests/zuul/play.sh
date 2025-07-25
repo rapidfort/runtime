@@ -22,6 +22,19 @@ POD_NETWORK_CIDR="10.244.0.0/16"
 ZUUL_USER="zuul"
 ZUUL_NAMESPACE="zuul-system"
 
+# Make apt non-interactive
+export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=none
+
+# Configure apt to be fully non-interactive
+mkdir -p /etc/apt/apt.conf.d
+cat > /etc/apt/apt.conf.d/99non-interactive << 'EOF'
+APT::Get::Assume-Yes "true";
+APT::Get::allow-unauthenticated "true";
+Dpkg::Options:: "--force-confdef";
+Dpkg::Options:: "--force-confold";
+EOF
+
 # Logging functions
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -59,6 +72,7 @@ COMMANDS:
     status          Show cluster and containerd status
     debug           Show debugging information
     test-ctr        Test ctr image operations
+    deploy-rapidfort Deploy RapidFort Runtime to existing cluster
     help            Show this help message
 
 OPTIONS:
@@ -73,12 +87,22 @@ WHAT IT DOES:
     - Sets up AppArmor/SELinux policies (if available)
     - Implements Zuul-like CI/CD restrictions
     - Creates restricted containerd socket permissions
+    - Automatically deploys RapidFort Runtime (if credentials exist)
+
+PREREQUISITES:
+    - Root access required
+    - For RapidFort Runtime:
+      • ~/.rapidfort/credentials file with RF_ACCESS_ID, RF_SECRET_ACCESS_KEY, RF_ROOT_URL
+      • helm installed (optional, for automatic deployment)
+      • rapidfort-registry-secret.yaml (optional)
 
 FEATURES:
     - Namespace-isolated containerd configuration
     - Restricted ctr access patterns
     - Zuul-specific security contexts
     - Limited container runtime permissions
+    - Automatic RapidFort Runtime deployment (if credentials exist)
+    - Manual RapidFort deployment with deploy-rapidfort command
 
 EOF
 }
@@ -126,6 +150,8 @@ install_containerd() {
     
     # Add Docker's official GPG key
     mkdir -p /etc/apt/keyrings
+    # Remove existing key if present to avoid prompt
+    rm -f /etc/apt/keyrings/docker.gpg
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     
     # Set up the repository
@@ -135,7 +161,8 @@ install_containerd() {
     
     # Install specific containerd version
     apt-get update
-    apt-get install -y containerd.io=${CONTAINERD_VERSION}-1
+    # Force installation even if there are prompts
+    apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" containerd.io=${CONTAINERD_VERSION}-1
     
     log_success "Containerd ${CONTAINERD_VERSION} installed"
     
@@ -396,6 +423,8 @@ install_kubernetes() {
     
     # Add Kubernetes repository
     mkdir -p /etc/apt/keyrings
+    # Remove existing key if present to avoid prompt
+    rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     curl -fsSL https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION%.*}/deb/Release.key | \
         gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     
@@ -404,7 +433,7 @@ install_kubernetes() {
     
     # Install specific versions
     apt-get update
-    apt-get install -y \
+    apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
         kubelet=${K8S_VERSION}-* \
         kubeadm=${K8S_VERSION}-* \
         kubectl=${K8S_VERSION}-*
@@ -491,6 +520,9 @@ EOF
     cp -f /etc/kubernetes/admin.conf /home/$ZUUL_USER/.kube/config
     chown -R $ZUUL_USER:$ZUUL_USER /home/$ZUUL_USER/.kube
     
+    # Export KUBECONFIG
+    export KUBECONFIG="$HOME/.kube/config"
+    
     # Remove taints on control plane
     kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true
     
@@ -500,6 +532,9 @@ EOF
 # Function to test ctr operations
 test_ctr_operations() {
     log_header "Testing ctr operations"
+    
+    # Ensure KUBECONFIG is set
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
     
     # Test as root
     log_info "Testing ctr as root..."
@@ -598,6 +633,9 @@ test_ctr_operations() {
 show_status() {
     log_header "Zuul Kubernetes Deployment Status"
     
+    # Ensure KUBECONFIG is set
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+    
     log_info "System Information:"
     echo "  Kubernetes: $(kubectl version --short 2>/dev/null | grep Server || echo 'Not running')"
     echo "  Containerd: $(containerd --version)"
@@ -631,11 +669,30 @@ show_status() {
         log_info "AppArmor profiles:"
         aa-status | grep zuul || echo "  No Zuul profiles loaded"
     fi
+    
+    # Check RapidFort Runtime status
+    if kubectl get namespace rapidfort &>/dev/null 2>&1; then
+        log_info "RapidFort Runtime status:"
+        local rf_pods=$(kubectl get pods -n rapidfort -l app=rfruntime --no-headers 2>/dev/null | grep -c Running || echo 0)
+        if [[ "$rf_pods" -gt 0 ]]; then
+            log_success "RapidFort Runtime is running ($rf_pods pods)"
+            kubectl get pods -n rapidfort --no-headers | head -5
+        else
+            log_warning "RapidFort Runtime not running"
+            echo "  Deploy with: $0 deploy-rapidfort"
+        fi
+    else
+        log_info "RapidFort Runtime: Not deployed"
+        echo "  Deploy with: $0 deploy-rapidfort"
+    fi
 }
 
 # Function to show debug information
 show_debug() {
     log_header "Debug Information"
+    
+    # Ensure KUBECONFIG is set
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
     
     # Environment variables
     log_info "Zuul-related environment variables:"
@@ -711,12 +768,136 @@ show_debug() {
     fi
 }
 
+# Function to deploy RapidFort Runtime
+deploy_rapidfort() {
+    log_info "Deploying RapidFort Runtime to Zuul Kubernetes cluster"
+    
+    # Ensure KUBECONFIG is set
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+    
+    # Check if cluster is running
+    if ! kubectl cluster-info &>/dev/null; then
+        log_error "Kubernetes cluster is not running. Install first with: $0 install"
+        exit 1
+    fi
+    
+    # Check if helm is installed
+    if ! command -v helm &> /dev/null; then
+        log_error "Helm is not installed. Please install helm first."
+        log_info "Visit: https://helm.sh/docs/intro/install/"
+        exit 1
+    fi
+    
+    # Check prerequisites
+    if [[ ! -f "$HOME/.rapidfort/credentials" ]]; then
+        log_error "RapidFort credentials not found at ~/.rapidfort/credentials"
+        exit 1
+    fi
+    
+    # Load credentials
+    source "$HOME/.rapidfort/credentials" 2>/dev/null || true
+    
+    # Check for alternate credential format
+    if [[ -z "$RF_ACCESS_ID" ]]; then
+        RF_ACCESS_ID=$(grep -E "^access_id\s*=" "$HOME/.rapidfort/credentials" 2>/dev/null | cut -d'=' -f2- | xargs)
+    fi
+    if [[ -z "$RF_SECRET_ACCESS_KEY" ]]; then
+        RF_SECRET_ACCESS_KEY=$(grep -E "^secret_key\s*=" "$HOME/.rapidfort/credentials" 2>/dev/null | cut -d'=' -f2- | xargs)
+    fi
+    if [[ -z "$RF_ROOT_URL" ]]; then
+        RF_ROOT_URL=$(grep -E "^rf_root_url\s*=" "$HOME/.rapidfort/credentials" 2>/dev/null | cut -d'=' -f2- | xargs)
+    fi
+    
+    if [[ -z "$RF_ACCESS_ID" ]] || [[ -z "$RF_SECRET_ACCESS_KEY" ]] || [[ -z "$RF_ROOT_URL" ]]; then
+        log_error "Invalid or incomplete RapidFort credentials"
+        log_info "Expected format in ~/.rapidfort/credentials:"
+        echo "  RF_ACCESS_ID=your-access-id"
+        echo "  RF_SECRET_ACCESS_KEY=your-secret-key"
+        echo "  RF_ROOT_URL=https://your-rapidfort-url"
+        echo "  OR"
+        echo "  access_id = your-access-id"
+        echo "  secret_key = your-secret-key"
+        echo "  rf_root_url = https://your-rapidfort-url"
+        exit 1
+    fi
+    
+    # Create namespace
+    kubectl create namespace rapidfort --dry-run=client -o yaml | kubectl apply -f -
+    
+    # Create credentials secret
+    kubectl create secret generic rfruntime-credentials \
+        --namespace rapidfort \
+        --from-literal=RF_ACCESS_ID="$RF_ACCESS_ID" \
+        --from-literal=RF_SECRET_ACCESS_KEY="$RF_SECRET_ACCESS_KEY" \
+        --from-literal=RF_ROOT_URL="$RF_ROOT_URL" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    
+    # Check for registry secret
+    if [[ -f "rapidfort-registry-secret.yaml" ]]; then
+        kubectl apply -f rapidfort-registry-secret.yaml -n rapidfort
+        local secret_applied=true
+    else
+        log_warning "rapidfort-registry-secret.yaml not found, proceeding without it"
+        log_info "If you have registry authentication issues, create rapidfort-registry-secret.yaml"
+        local secret_applied=false
+    fi
+    
+    # Deploy RapidFort Runtime
+    log_info "Installing RapidFort Runtime with Helm..."
+    
+    # Build helm command
+    local helm_args=(
+        "upgrade" "--install" "rfruntime"
+        "oci://quay.io/rapidfort/runtime"
+        "--namespace" "rapidfort"
+        "--set" "ClusterName=zuul-cluster"
+        "--set" "ClusterCaption=Zuul Kubernetes Cluster"
+        "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
+        "--set" "variant=generic"
+        "--set" "scan.enabled=true"
+        "--set" "profile.enabled=false"
+        "--wait" "--timeout=5m"
+    )
+    
+    # Add image pull secret if applied
+    if [[ "$secret_applied" == "true" ]]; then
+        helm_args+=("--set" 'imagePullSecrets.names={rapidfort-registry-secret}')
+    fi
+    
+    helm "${helm_args[@]}"
+    
+    # Check deployment
+    if kubectl rollout status daemonset/rfruntime -n rapidfort --timeout=300s &>/dev/null; then
+        log_success "RapidFort Runtime deployed successfully"
+        echo ""
+        echo "RapidFort Runtime Commands:"
+        echo "  # Check logs: kubectl logs -n rapidfort -l app=rfruntime -c sentry -f"
+        echo "  # Check scan results: rfjobs"
+        echo ""
+        echo "To set up rfjobs command (if not already available):"
+        echo "  echo 'alias rfjobs=\"kubectl logs -n rapidfort -l app=rfruntime -c sentry | grep -E \\\"(PASSED|FAILED|SCAN_COMPLETED|ERROR)\\\" | tail -20\"' >> ~/.bashrc"
+        echo "  source ~/.bashrc"
+        echo ""
+        echo "To test containerd issues with RapidFort:"
+        echo "  # Run: $0 test-ctr"
+    else
+        log_warning "RapidFort Runtime deployment may need more time"
+        echo ""
+        echo "Check deployment status:"
+        echo "  kubectl get pods -n rapidfort"
+        echo "  kubectl describe pods -n rapidfort"
+    fi
+}
+
 # Main installation function
 install_all() {
     local registry_ip="$1"
     local strict_mode="$2"
     
     log_header "Installing Zuul-based Kubernetes Environment"
+    
+    # Set non-interactive mode for all apt operations
+    export DEBIAN_FRONTEND=noninteractive
     
     # Check root
     if [[ $EUID -ne 0 ]]; then
@@ -772,6 +953,46 @@ install_all() {
     
     log_success "Installation complete!"
     
+    # Clean up apt configuration
+    rm -f /etc/apt/apt.conf.d/99non-interactive
+    
+    # Try to deploy RapidFort Runtime if credentials exist
+    if [[ -f "$HOME/.rapidfort/credentials" ]]; then
+        log_info "Found RapidFort credentials, attempting to deploy RapidFort Runtime..."
+        
+        # Load credentials
+        source "$HOME/.rapidfort/credentials" 2>/dev/null || true
+        
+        # Check for alternate credential format
+        if [[ -z "$RF_ACCESS_ID" ]]; then
+            RF_ACCESS_ID=$(grep -E "^access_id\s*=" "$HOME/.rapidfort/credentials" 2>/dev/null | cut -d'=' -f2- | xargs)
+        fi
+        if [[ -z "$RF_SECRET_ACCESS_KEY" ]]; then
+            RF_SECRET_ACCESS_KEY=$(grep -E "^secret_key\s*=" "$HOME/.rapidfort/credentials" 2>/dev/null | cut -d'=' -f2- | xargs)
+        fi
+        if [[ -z "$RF_ROOT_URL" ]]; then
+            RF_ROOT_URL=$(grep -E "^rf_root_url\s*=" "$HOME/.rapidfort/credentials" 2>/dev/null | cut -d'=' -f2- | xargs)
+        fi
+        
+        if [[ -n "$RF_ACCESS_ID" ]] && [[ -n "$RF_SECRET_ACCESS_KEY" ]] && [[ -n "$RF_ROOT_URL" ]]; then
+            if command -v helm &> /dev/null; then
+                deploy_rapidfort || log_warning "RapidFort Runtime deployment failed, you can deploy it later with: $0 deploy-rapidfort"
+            else
+                log_warning "Helm not installed, skipping RapidFort Runtime deployment"
+                log_info "To deploy RapidFort Runtime later:"
+                echo "  1. Install helm: https://helm.sh/docs/intro/install/"
+                echo "  2. Run: $0 deploy-rapidfort"
+            fi
+        else
+            log_warning "RapidFort credentials incomplete, skipping Runtime deployment"
+        fi
+    else
+        log_info "RapidFort credentials not found"
+        log_info "To deploy RapidFort Runtime later:"
+        echo "  1. Place credentials in ~/.rapidfort/credentials"
+        echo "  2. Run: $0 deploy-rapidfort"
+    fi
+    
     # Show important info
     echo ""
     log_info "Important Information:"
@@ -779,16 +1000,29 @@ install_all() {
     echo "  • Containerd namespace: zuul-ci"
     echo "  • Kubernetes namespace: $ZUUL_NAMESPACE"
     echo "  • Socket permissions: Restricted to root and docker group"
+    echo "  • Kubeconfig: $HOME/.kube/config"
     echo ""
     log_info "To test ctr issues:"
     echo "  # As root: $0 test-ctr"
     echo "  # As zuul: su - $ZUUL_USER"
     echo "  # Then: sudo ctr -n zuul-ci image pull alpine"
+    
+    # Check if RapidFort Runtime was deployed
+    if kubectl get namespace rapidfort &>/dev/null 2>&1; then
+        echo ""
+        log_info "RapidFort Runtime Commands:"
+        echo "  # Check logs: kubectl logs -n rapidfort -l app=rfruntime -c sentry -f"
+        echo "  # Check scan results: rfjobs"
+        echo "  # Check runtime status: $0 status"
+    fi
 }
 
 # Uninstall function
 uninstall_all() {
     log_header "Uninstalling Zuul Kubernetes Environment"
+    
+    # Set non-interactive mode
+    export DEBIAN_FRONTEND=noninteractive
     
     # Reset kubernetes
     if command -v kubeadm &> /dev/null; then
@@ -818,6 +1052,9 @@ uninstall_all() {
         apparmor_parser -R /etc/apparmor.d/zuul.ctr 2>/dev/null || true
         rm -f /etc/apparmor.d/zuul.ctr
     fi
+    
+    # Clean up apt configuration
+    rm -f /etc/apt/apt.conf.d/99non-interactive
     
     log_success "Uninstall complete"
 }
@@ -851,6 +1088,9 @@ main() {
             ;;
         test-ctr)
             test_ctr_operations
+            ;;
+        deploy-rapidfort)
+            deploy_rapidfort
             ;;
         help|--help|-h)
             show_help
