@@ -45,6 +45,32 @@ log_header() {
     echo -e "${PURPLE}===================================================${NC}\n"
 }
 
+# Function to detect host IP if RF_LOCAL_REGISTRY not set
+detect_host_ip() {
+    local host_ip=""
+    
+    # First try RF_LOCAL_REGISTRY
+    if [[ -n "$RF_LOCAL_REGISTRY" ]]; then
+        echo "$RF_LOCAL_REGISTRY"
+        return
+    fi
+    
+    # Try to get IP from default route
+    host_ip=$(ip route get 1.1.1.1 | awk '{print $7; exit}' 2>/dev/null || true)
+    
+    if [[ -z "$host_ip" ]]; then
+        # Fallback to hostname -I
+        host_ip=$(hostname -I | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)
+    fi
+    
+    if [[ -z "$host_ip" ]]; then
+        # Last resort - try to get from network interfaces
+        host_ip=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d'/' -f1 | head -1)
+    fi
+    
+    echo "$host_ip"
+}
+
 # Function to check RF_LOCAL_REGISTRY
 check_registry_ip() {
     if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
@@ -65,7 +91,7 @@ Kubernetes Cluster Management Master Script
 USAGE:
     $0 [cluster-type] [command] [options]
     $0 test-all [options]
-    $0 deploy-rapidfort [cluster-type]
+    $0 deploy-rapidfort [cluster-type] [options]
     $0 help
 
 CLUSTER TYPES:
@@ -96,6 +122,8 @@ OPTIONS:
     --log-file         Save output to log file
     --timeout          Timeout for operations (default: 600s)
     --strict           For zuul: Apply strict security policies
+    --local-registry   Use local registry for RapidFort images
+    --image-tag        Tag for RapidFort images (e.g., 3.1.32-dev6)
 
 EXAMPLES:
     # Install k0s cluster
@@ -110,11 +138,17 @@ EXAMPLES:
     # Deploy RapidFort to specific cluster type
     $0 deploy-rapidfort k3s
     
+    # Deploy RapidFort from local registry
+    $0 deploy-rapidfort --local-registry --image-tag 3.1.32-dev6
+    
     # Show status of kind cluster
     $0 kind status
     
     # Test k3s (install, deploy RF, run tests, uninstall)
     $0 k3s test
+    
+    # Test with local registry
+    $0 k3s test --local-registry --image-tag 3.1.32-dev6
     
     # Test all cluster types
     $0 test-all
@@ -123,7 +157,7 @@ EXAMPLES:
     $0 test-all --keep-cluster
 
 REQUIREMENTS:
-    - RF_LOCAL_REGISTRY environment variable must be set
+    - RF_LOCAL_REGISTRY environment variable must be set (or auto-detected)
     - Root/sudo access for most cluster types
     - Docker for kind/minikube
     - Each cluster's play.sh in respective folder
@@ -247,6 +281,18 @@ wait_for_pods_ready() {
 # Function to deploy RapidFort runtime
 deploy_rapidfort_runtime() {
     local cluster_type="${1:-$CURRENT_CLUSTER_TYPE}"
+    local use_local_registry="false"
+    local image_tag=""
+    
+    # Parse additional arguments
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --local-registry) use_local_registry="true"; shift ;;
+            --image-tag) image_tag="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
     
     # If no cluster type specified, try to detect from current context
     if [[ -z "$cluster_type" ]]; then
@@ -286,20 +332,26 @@ deploy_rapidfort_runtime() {
         return 1
     fi
     
-    # Check for registry secret - MUST exist
-    local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
-    if [[ ! -f "$registry_secret_path" ]]; then
-        log_error "Registry secret not found at: $registry_secret_path"
-        log_error "This file is required for RapidFort Runtime deployment"
+    # Get registry IP
+    local registry_ip=""
+    if [[ -n "$RF_LOCAL_REGISTRY" ]]; then
+        registry_ip="$RF_LOCAL_REGISTRY"
+    else
+        # Auto-detect IP
+        registry_ip=$(detect_host_ip)
+    fi
+    
+    if [[ -z "$registry_ip" ]]; then
+        log_error "Could not determine registry IP. Please set RF_LOCAL_REGISTRY"
         return 1
     fi
     
-
+    log_info "Using registry IP: $registry_ip"
+    
     local creds_file="$HOME/.rapidfort/credentials"
     export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
     export RF_SECRET_ACCESS_KEY=$(grep "secret_key" "$creds_file" | cut -d'=' -f2 | xargs)
     export RF_ROOT_URL=$(grep "rf_root_url" "$creds_file" | cut -d'=' -f2 | xargs)
-
     
     if [[ -z "$RF_ACCESS_ID" ]] || [[ -z "$RF_SECRET_ACCESS_KEY" ]] || [[ -z "$RF_ROOT_URL" ]]; then
         log_error "Invalid or incomplete RapidFort credentials"
@@ -317,8 +369,16 @@ deploy_rapidfort_runtime() {
         --from-literal=RF_ROOT_URL="$RF_ROOT_URL" \
         --dry-run=client -o yaml | kubectl apply -f -
     
-    # Apply registry secret
-    kubectl apply -f "$registry_secret_path" -n rapidfort
+    # Apply registry secret if exists
+    local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
+    if [[ -f "$registry_secret_path" ]]; then
+        kubectl apply -f "$registry_secret_path" -n rapidfort
+    else
+        if [[ "$use_local_registry" != "true" ]]; then
+            log_warning "Registry secret not found at: $registry_secret_path"
+            log_warning "This may be required for pulling from quay.io"
+        fi
+    fi
     
     # Install RapidFort Runtime with Helm
     log_info "Installing RapidFort Runtime with Helm..."
@@ -331,20 +391,59 @@ deploy_rapidfort_runtime() {
         *) variant="generic" ;;
     esac
     
-    # Cluster name is just the type
-    local cluster_name="$cluster_type"
+    # Build helm arguments
+    local helm_args=(
+        "upgrade" "--install" "rfruntime"
+        "oci://quay.io/rapidfort/runtime"
+        "--namespace" "rapidfort"
+        "--set" "ClusterName=$cluster_type"
+        "--set" "ClusterCaption=$cluster_type Cluster"
+        "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
+        "--set" "variant=$variant"
+        "--set" "scan.enabled=true"
+        "--set" "profile.enabled=false"
+        "--wait" "--timeout=5m"
+    )
     
-    # Always set imagePullSecrets
-    helm upgrade --install rfruntime oci://quay.io/rapidfort/runtime \
-        --namespace rapidfort \
-        --set ClusterName="$cluster_name" \
-        --set ClusterCaption="$cluster_type Cluster" \
-        --set rapidfort.credentialsSecret=rfruntime-credentials \
-        --set variant="$variant" \
-        --set scan.enabled=true \
-        --set profile.enabled=false \
-        --set 'imagePullSecrets[0].name=rapidfort-registry-secret' \
-        --wait --timeout=5m
+    # Check if we should use local registry
+    if [[ "$use_local_registry" == "true" ]] || [[ "$RF_USE_LOCAL_REGISTRY" == "true" ]]; then
+        log_info "Configuring RapidFort Runtime to use local registry"
+        
+        # Override the registry in values.yaml
+        helm_args+=("--set" "registry=$registry_ip:5000/rapidfort")
+        
+        # Set image tag if specified
+        if [[ -n "$image_tag" ]]; then
+            helm_args+=("--set" "imageTag=$image_tag")
+        fi
+        
+        # Always pull from local registry
+        helm_args+=("--set" "imagePullPolicy=Always")
+        
+        log_info "RapidFort images will be pulled from: $registry_ip:5000/rapidfort"
+        log_info "Make sure the following images are available:"
+        local tag_info=""
+        if [[ -n "$image_tag" ]]; then
+            tag_info=":$image_tag"
+        fi
+        echo "  - $registry_ip:5000/rapidfort/sentry$tag_info"
+        echo "  - $registry_ip:5000/rapidfort/controller$tag_info"
+        echo "  - $registry_ip:5000/rapidfort/rfwrap-init$tag_info"
+        echo "  - $registry_ip:5000/rapidfort/bpf$tag_info"
+    else
+        # Add imagePullSecrets for quay.io if registry secret exists
+        if [[ -f "$registry_secret_path" ]]; then
+            helm_args+=("--set" "imagePullSecrets[0].name=rapidfort-registry-secret")
+        fi
+    fi
+    
+    # Execute helm install
+    if helm "${helm_args[@]}"; then
+        log_success "RapidFort Runtime helm chart installed"
+    else
+        log_error "Helm installation failed"
+        return 1
+    fi
     
     # Wait for RapidFort pods to be ready
     log_info "Waiting for RapidFort Runtime to be ready..."
@@ -362,6 +461,7 @@ deploy_rapidfort_runtime() {
         return 1
     fi
 }
+
 # Function to run coverage test
 run_coverage_test() {
     log_info "Running coverage test..."
@@ -393,6 +493,8 @@ test_cluster() {
     local skip_runtime="$2"
     local skip_coverage="$3"
     local keep_cluster="$4"
+    shift 4 || true
+    local extra_args=("$@")
     
     export CURRENT_CLUSTER_TYPE="$cluster_type"
     
@@ -418,7 +520,7 @@ test_cluster() {
     
     # Deploy RapidFort Runtime
     if [[ "$skip_runtime" != "true" ]]; then
-        if ! deploy_rapidfort_runtime "$cluster_type"; then
+        if ! deploy_rapidfort_runtime "$cluster_type" "${extra_args[@]}"; then
             log_warning "Failed to deploy RapidFort Runtime"
             # Continue with test even if RF deployment fails
         fi
@@ -466,6 +568,8 @@ test_all_clusters() {
     local skip_runtime="$1"
     local skip_coverage="$2"
     local keep_cluster="$3"
+    shift 3 || true
+    local extra_args=("$@")
     
     log_header "Testing All Kubernetes Cluster Types"
     log_info "Registry IP: $RF_LOCAL_REGISTRY"
@@ -503,7 +607,7 @@ test_all_clusters() {
         
         local start_time=$(date +%s)
         
-        if test_cluster "$cluster_type" "$skip_runtime" "$skip_coverage" "$keep_cluster"; then
+        if test_cluster "$cluster_type" "$skip_runtime" "$skip_coverage" "$keep_cluster" "${extra_args[@]}"; then
             local end_time=$(date +%s)
             local duration=$((end_time - start_time))
             log_success "$cluster_type: PASSED (Duration: ${duration}s)"
@@ -577,6 +681,8 @@ main() {
     local keep_cluster="false"
     local timeout="600"
     local strict_mode="false"
+    local use_local_registry="false"
+    local image_tag=""
     
     # Check for special commands first
     case "$command" in
@@ -591,6 +697,7 @@ main() {
         deploy-rapidfort)
             shift
             cluster_type="${1:-}"
+            shift || true
             
             # Check if we have a working kubectl
             if ! kubectl cluster-info &>/dev/null; then
@@ -599,25 +706,37 @@ main() {
                 exit 1
             fi
             
-            # Deploy RapidFort Runtime
-            deploy_rapidfort_runtime "$cluster_type"
+            # Deploy RapidFort Runtime with remaining arguments
+            deploy_rapidfort_runtime "$cluster_type" "$@"
             exit $?
             ;;
         test-all)
             shift
             # Parse options for test-all
+            local extra_args=()
             while [[ $# -gt 0 ]]; do
                 case $1 in
                     --skip-runtime) skip_runtime="true"; shift ;;
                     --skip-coverage) skip_coverage="true"; shift ;;
                     --keep-cluster) keep_cluster="true"; shift ;;
                     --timeout) timeout="$2"; shift 2 ;;
+                    --local-registry) extra_args+=("--local-registry"); shift ;;
+                    --image-tag) extra_args+=("--image-tag" "$2"); shift 2 ;;
                     *) log_error "Unknown option: $1"; exit 1 ;;
                 esac
             done
             
-            check_registry_ip
-            test_all_clusters "$skip_runtime" "$skip_coverage" "$keep_cluster"
+            # Set RF_LOCAL_REGISTRY if not set
+            if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
+                RF_LOCAL_REGISTRY=$(detect_host_ip)
+                if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
+                    log_error "Could not detect registry IP. Please set RF_LOCAL_REGISTRY"
+                    exit 1
+                fi
+                export RF_LOCAL_REGISTRY
+            fi
+            
+            test_all_clusters "$skip_runtime" "$skip_coverage" "$keep_cluster" "${extra_args[@]}"
             exit $?
             ;;
     esac
@@ -655,6 +774,8 @@ main() {
                 extra_args+=("--strict")
                 shift 
                 ;;
+            --local-registry) extra_args+=("--local-registry"); shift ;;
+            --image-tag) extra_args+=("--image-tag" "$2"); shift 2 ;;
             *) extra_args+=("$1"); shift ;;
         esac
     done
@@ -663,7 +784,14 @@ main() {
     case "$command" in
         install|uninstall|status)
             if [[ "$cluster_type" != "zuul" ]]; then
-                check_registry_ip
+                if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
+                    RF_LOCAL_REGISTRY=$(detect_host_ip)
+                    if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
+                        log_error "Could not detect registry IP. Please set RF_LOCAL_REGISTRY"
+                        exit 1
+                    fi
+                    export RF_LOCAL_REGISTRY
+                fi
             fi
             check_cluster_folder "$cluster_type" || exit 1
             export CURRENT_CLUSTER_TYPE="$cluster_type"
@@ -671,10 +799,17 @@ main() {
             ;;
         test)
             if [[ "$cluster_type" != "zuul" ]]; then
-                check_registry_ip
+                if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
+                    RF_LOCAL_REGISTRY=$(detect_host_ip)
+                    if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
+                        log_error "Could not detect registry IP. Please set RF_LOCAL_REGISTRY"
+                        exit 1
+                    fi
+                    export RF_LOCAL_REGISTRY
+                fi
             fi
             export CURRENT_CLUSTER_TYPE="$cluster_type"
-            test_cluster "$cluster_type" "$skip_runtime" "$skip_coverage" "$keep_cluster"
+            test_cluster "$cluster_type" "$skip_runtime" "$skip_coverage" "$keep_cluster" "${extra_args[@]}"
             ;;
         test-ctr|debug)
             # Pass through commands for zuul

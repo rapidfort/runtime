@@ -33,6 +33,32 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Function to detect host IP if RF_LOCAL_REGISTRY not set
+detect_host_ip() {
+    local host_ip=""
+    
+    # First try RF_LOCAL_REGISTRY
+    if [[ -n "$RF_LOCAL_REGISTRY" ]]; then
+        echo "$RF_LOCAL_REGISTRY"
+        return
+    fi
+    
+    # Try to get IP from default route
+    host_ip=$(ip route get 1.1.1.1 | awk '{print $7; exit}' 2>/dev/null || true)
+    
+    if [[ -z "$host_ip" ]]; then
+        # Fallback to hostname -I
+        host_ip=$(hostname -I | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)
+    fi
+    
+    if [[ -z "$host_ip" ]]; then
+        # Last resort - try to get from network interfaces
+        host_ip=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d'/' -f1 | head -1)
+    fi
+    
+    echo "$host_ip"
+}
+
 # Function to show help
 show_help() {
     cat << EOF
@@ -50,12 +76,16 @@ COMMANDS:
 
 OPTIONS:
     --registry-ip   IP address for registry (optional, defaults to RF_LOCAL_REGISTRY)
+    --local-registry Use local registry for RapidFort images
+    --image-tag     Tag for RapidFort images (e.g., 3.1.32-dev6)
     -h, --help      Show this help
 
 EXAMPLES:
     $0 install --registry-ip 100.100.100.100
     $0 install  # Uses RF_LOCAL_REGISTRY
     $0 status
+    $0 deploy-rapidfort
+    $0 deploy-rapidfort --local-registry --image-tag 3.1.32-dev6
     $0 uninstall
 
 WHAT IT DOES:
@@ -194,12 +224,11 @@ show_status() {
 
 # Function to deploy RapidFort Runtime
 deploy_rapidfort() {
-    log_info "Deploying RapidFort Runtime to [CLUSTER_TYPE] cluster"
+    log_info "Deploying RapidFort Runtime to k3s cluster"
     
-    # Check if [CLUSTER_TYPE] is running
-    # NOTE: Replace this check with cluster-specific logic
-    if ! [CLUSTER_RUNNING_CHECK]; then
-        log_error "[CLUSTER_TYPE] is not running. Install [CLUSTER_TYPE] first with: $0 install"
+    # Check if k3s is running
+    if ! systemctl is-active --quiet k3s || ! kubectl cluster-info &>/dev/null; then
+        log_error "k3s is not running. Install k3s first with: $0 install"
         exit 1
     fi
     
@@ -216,19 +245,19 @@ deploy_rapidfort() {
         exit 1
     fi
     
-    # Check for registry secret - MUST exist
-    local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
-    if [[ ! -f "$registry_secret_path" ]]; then
-        log_error "Registry secret not found at: $registry_secret_path"
-        log_error "This file is required for RapidFort Runtime deployment"
+    # Get registry IP
+    local registry_ip=$(detect_host_ip)
+    if [[ -z "$registry_ip" ]]; then
+        log_error "Could not determine host IP address. Please set RF_LOCAL_REGISTRY"
         exit 1
     fi
+    log_info "Using registry IP: $registry_ip"
     
+    # Parse credentials
     local creds_file="$HOME/.rapidfort/credentials"
     export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
     export RF_SECRET_ACCESS_KEY=$(grep "secret_key" "$creds_file" | cut -d'=' -f2 | xargs)
     export RF_ROOT_URL=$(grep "rf_root_url" "$creds_file" | cut -d'=' -f2 | xargs)
-
     
     if [[ -z "$RF_ACCESS_ID" ]] || [[ -z "$RF_SECRET_ACCESS_KEY" ]] || [[ -z "$RF_ROOT_URL" ]]; then
         log_error "Invalid or incomplete RapidFort credentials"
@@ -246,52 +275,139 @@ deploy_rapidfort() {
         --from-literal=RF_ROOT_URL="$RF_ROOT_URL" \
         --dry-run=client -o yaml | kubectl apply -f -
     
-    # Apply registry secret
-    kubectl apply -f "$registry_secret_path" -n rapidfort
+    # Check for local registry option
+    local use_local_registry=false
+    local runtime_chart="oci://quay.io/rapidfort/runtime"
+    local image_tag=""
+    
+    # Parse command line arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --local-registry)
+                use_local_registry=true
+                shift
+                ;;
+            --registry-ip)
+                registry_ip="$2"
+                shift 2
+                ;;
+            --image-tag)
+                image_tag="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    # Apply registry secret if exists
+    local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
+    if [[ -f "$registry_secret_path" ]]; then
+        kubectl apply -f "$registry_secret_path" -n rapidfort
+    else
+        log_warning "Registry secret not found at: $registry_secret_path"
+        if [[ "$use_local_registry" == "false" ]]; then
+            log_warning "Registry secret may be required for pulling from quay.io"
+        fi
+    fi
     
     # Deploy RapidFort Runtime
     log_info "Installing RapidFort Runtime with Helm..."
     
-    # NOTE: Adjust variant based on cluster type
-    # k0s -> variant="k0s"
-    # k3s -> variant="k3s"
-    # others -> variant="generic"
+    local helm_args=(
+        "upgrade" "--install" "rfruntime"
+        "$runtime_chart"
+        "--namespace" "rapidfort"
+        "--set" "ClusterName=k3s"
+        "--set" "ClusterCaption=k3s Cluster"
+        "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
+        "--set" "variant=k3s"
+        "--set" "scan.enabled=true"
+        "--set" "profile.enabled=false"
+        "--wait" "--timeout=5m"
+    )
     
-    helm upgrade --install rfruntime oci://quay.io/rapidfort/runtime \
-        --namespace rapidfort \
-        --set ClusterName="[CLUSTER_TYPE]" \
-        --set ClusterCaption="[CLUSTER_TYPE] Cluster" \
-        --set rapidfort.credentialsSecret=rfruntime-credentials \
-        --set variant="[VARIANT]" \
-        --set scan.enabled=true \
-        --set profile.enabled=false \
-        --set 'imagePullSecrets[0].name=rapidfort-registry-secret' \
-        --wait --timeout=5m
+    # Check if we should use local registry
+    if [[ "$use_local_registry" == "true" ]] || [[ "$RF_USE_LOCAL_REGISTRY" == "true" ]]; then
+        use_local_registry=true
+        log_info "Using local registry for RapidFort Runtime images"
+        
+        # Override the registry value in values.yaml
+        helm_args+=(
+            "--set" "registry=$registry_ip:5000/rapidfort"
+        )
+        
+        # If image tag is specified, use it
+        if [[ -n "$image_tag" ]]; then
+            helm_args+=("--set" "imageTag=$image_tag")
+        fi
+        
+        # Set pull policy to Always for local registry
+        helm_args+=("--set" "imagePullPolicy=Always")
+        
+        log_info "Note: Make sure all RapidFort images are available in local registry:"
+        echo "  Images needed (example with tag 3.1.32-dev6):"
+        echo "    - $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
+        echo "    - $registry_ip:5000/rapidfort/controller:3.1.32-dev6"
+        echo "    - $registry_ip:5000/rapidfort/rfwrap-init:3.1.32-dev6"
+        echo "    - $registry_ip:5000/rapidfort/bpf:3.1.32-dev6"
+        echo ""
+        echo "  To push images (example):"
+        echo "    docker pull quay.io/rapidfort/sentry:3.1.32-dev6"
+        echo "    docker tag quay.io/rapidfort/sentry:3.1.32-dev6 $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
+        echo "    docker push $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
+        echo ""
+        echo "  Helm will use registry: $registry_ip:5000/rapidfort"
+        if [[ -n "$image_tag" ]]; then
+            echo "  Image tag: $image_tag"
+        fi
+    else
+        # Add imagePullSecrets for quay.io
+        if [[ -f "$registry_secret_path" ]]; then
+            helm_args+=("--set" "imagePullSecrets[0].name=rapidfort-registry-secret")
+        fi
+    fi
+    
+    # Execute helm install
+    if helm "${helm_args[@]}"; then
+        log_success "RapidFort Runtime helm chart installed"
+    else
+        log_error "Helm installation failed"
+        kubectl describe pods -n rapidfort
+        exit 1
+    fi
     
     # Check deployment
-    if kubectl rollout status daemonset/rfruntime -n rapidfort --timeout=300s; then
+    log_info "Waiting for RapidFort Runtime pods to be ready..."
+    if kubectl wait --for=condition=ready pod -l app=rfruntime -n rapidfort --timeout=300s; then
         log_success "RapidFort Runtime deployed successfully"
+        echo ""
+        kubectl get pods -n rapidfort -o wide
         echo ""
         echo "Commands:"
         echo "  # Check logs: kubectl logs -n rapidfort -l app=rfruntime -c sentry -f"
         echo "  # Check scan results: rfjobs"
+        echo "  # Check runtime status: kubectl get pods -n rapidfort"
+        echo "  # Check images being used: kubectl describe pods -n rapidfort | grep Image:"
     else
         log_error "RapidFort Runtime deployment failed"
+        kubectl describe pods -n rapidfort
         exit 1
     fi
 }
+
 # Function to install everything
 install_all() {
     local registry_ip="$1"
 
-    # If no registry IP provided, use RF_LOCAL_REGISTRY
+    # If no registry IP provided, use RF_LOCAL_REGISTRY or auto-detect
     if [[ -z "$registry_ip" ]]; then
-        if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
-            log_error "Registry IP is required. Use: $0 install --registry-ip <IP>"
-            log_error "Or set RF_LOCAL_REGISTRY environment variable"
+        registry_ip=$(detect_host_ip)
+        if [[ -z "$registry_ip" ]]; then
+            log_error "Could not determine registry IP. Please set RF_LOCAL_REGISTRY or use --registry-ip"
             exit 1
         fi
-        registry_ip="$RF_LOCAL_REGISTRY"
     fi
 
     log_info "Installing k3s cluster with registry at $registry_ip:5000"
@@ -545,9 +661,8 @@ main() {
                 exit 0
                 ;;
             *)
-                log_error "Unknown option: $1"
-                show_help
-                exit 1
+                # Pass remaining args to deploy-rapidfort
+                break
                 ;;
         esac
     done
@@ -563,7 +678,7 @@ main() {
             show_status
             ;;
         "deploy-rapidfort")
-            deploy_rapidfort
+            deploy_rapidfort "$@"
             ;;
         "help"|"--help"|"-h")
             show_help
