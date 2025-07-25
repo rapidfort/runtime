@@ -831,17 +831,9 @@ deploy_rapidfort() {
         --from-literal=RF_SECRET_ACCESS_KEY="$RF_SECRET_ACCESS_KEY" \
         --from-literal=RF_ROOT_URL="$RF_ROOT_URL" \
         --dry-run=client -o yaml | kubectl apply -f -
-    
-    # Check for registry secret
-    if [[ -f "rapidfort-registry-secret.yaml" ]]; then
-        kubectl apply -f rapidfort-registry-secret.yaml -n rapidfort
-        local secret_applied=true
-    else
-        log_warning "rapidfort-registry-secret.yaml not found, proceeding without it"
-        log_info "If you have registry authentication issues, create rapidfort-registry-secret.yaml"
-        local secret_applied=false
-    fi
-    
+
+    kubectl apply -f ${HOME}/rapidfort-registry-secret.yaml -n rapidfort
+
     # Deploy RapidFort Runtime
     log_info "Installing RapidFort Runtime with Helm..."
     
@@ -853,16 +845,11 @@ deploy_rapidfort() {
         "--set" "ClusterName=zuul-cluster"
         "--set" "ClusterCaption=Zuul Kubernetes Cluster"
         "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
-        "--set" "variant=generic"
         "--set" "scan.enabled=true"
         "--set" "profile.enabled=false"
+        "--set" 'imagePullSecrets.names={rapidfort-registry-secret}'
         "--wait" "--timeout=5m"
     )
-    
-    # Add image pull secret if applied
-    if [[ "$secret_applied" == "true" ]]; then
-        helm_args+=("--set" 'imagePullSecrets.names={rapidfort-registry-secret}')
-    fi
     
     helm "${helm_args[@]}"
     
