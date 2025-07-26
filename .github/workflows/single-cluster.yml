@@ -1,0 +1,77 @@
+name: Test Single Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_type:
+        description: 'Cluster type to test'
+        required: true
+        type: choice
+        options:
+          - k0s
+          - k3s
+          - kind
+          - kubeadm
+          - microk8s
+          - minikube
+
+env:
+  LINODE_TOKEN: ${{ secrets.LINODE_TOKEN }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Create VM and Test
+      run: |
+        # Setup
+        pip install linode-cli
+        mkdir -p ~/.config
+        echo -e "[DEFAULT]\ntoken = ${LINODE_TOKEN}\n" > ~/.config/linode-cli
+        
+        # Create VM
+        echo "Creating VM for ${{ inputs.cluster_type }}..."
+        vm_id=$(linode-cli linodes create \
+          --no-defaults \
+          --type g6-standard-2 \
+          --region us-east \
+          --image linode/ubuntu22.04 \
+          --label "test-${{ inputs.cluster_type }}" \
+          --root_pass "${{ secrets.VM_ROOT_PASSWORD }}" \
+          --booted true \
+          --text --no-headers --format 'id')
+        
+        # Wait and get IP
+        sleep 60
+        ip=$(linode-cli linodes view $vm_id --no-defaults --text --no-headers --format 'ipv4' | awk '{print $1}')
+        echo "VM ready at $ip"
+        
+        # Run tests with credentials
+        sshpass -p "${{ secrets.VM_ROOT_PASSWORD }}" ssh -o StrictHostKeyChecking=no root@$ip << 'EOF'
+        # Install dependencies
+        apt-get update && apt-get install -y git
+        
+        # Setup RapidFort credentials
+        mkdir -p /root/.rapidfort
+        cat > /root/.rapidfort/rapidfort-registry-secret.yaml << 'REGISTRY_EOF'
+        ${{ secrets.RF_REGISTRY_SECRET_YAML }}
+        REGISTRY_EOF
+        
+        # Export environment variables
+        export RF_ACCESS_ID="${{ secrets.RF_ACCESS_ID }}"
+        export RF_SECRET_ACCESS_KEY="${{ secrets.RF_SECRET_ACCESS_KEY }}"
+        export RF_ROOT_URL="${{ secrets.RF_ROOT_URL }}"
+        
+        # Clone and run tests
+        git clone https://github.com/rapidfort/runtime.git
+        cd runtime/tests
+        chmod +x master.sh coverage.sh
+        ./master.sh ${{ inputs.cluster_type }} install
+        ./master.sh deploy-rapidfort ${{ inputs.cluster_type }}
+        ./coverage.sh -m blast -c
+        EOF
+        
+        # If we get here, tests passed - destroy VM
+        linode-cli linodes delete $vm_id --no-defaults
+
