@@ -35,7 +35,7 @@ jobs:
         echo "Creating VM for ${{ inputs.cluster_type }}..."
         vm_id=$(linode-cli linodes create \
           --no-defaults \
-          --type g6-standard-2 \
+          --type g6-standard-4 \
           --region us-east \
           --image linode/ubuntu22.04 \
           --label "test-${{ inputs.cluster_type }}" \

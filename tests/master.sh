@@ -1141,7 +1141,7 @@ run_coverage_test() {
     
     # Wait for all pods to be ready after coverage deployment
     log_info "Waiting for all coverage test pods to be ready..."
-    wait_for_pods_ready 600
+    wait_for_pods_ready 1500
     
     log_success "Coverage test completed"
     return 0
