@@ -45,6 +45,257 @@ log_header() {
     echo -e "${PURPLE}===================================================${NC}\n"
 }
 
+# Function to detect OS and architecture
+detect_system() {
+    local os=""
+    local arch=""
+    
+    # Detect OS
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        os="linux"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        os="darwin"
+    else
+        log_error "Unsupported OS: $OSTYPE"
+        return 1
+    fi
+    
+    # Detect architecture
+    case $(uname -m) in
+        x86_64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        armv7l) arch="arm" ;;
+        *) 
+            log_error "Unsupported architecture: $(uname -m)"
+            return 1
+            ;;
+    esac
+    
+    echo "${os}-${arch}"
+}
+
+# Function to install kubectl
+install_kubectl() {
+    log_info "Installing kubectl..."
+    
+    local system=$(detect_system)
+    if [[ -z "$system" ]]; then
+        return 1
+    fi
+    
+    # Get latest stable version
+    local version=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+    log_info "Installing kubectl version: $version"
+    
+    # Download kubectl
+    local url="https://dl.k8s.io/release/${version}/bin/${system%%-*}/${system##*-}/kubectl"
+    
+    if command -v wget &> /dev/null; then
+        wget -q -O /tmp/kubectl "$url"
+    elif command -v curl &> /dev/null; then
+        curl -L -s -o /tmp/kubectl "$url"
+    else
+        log_error "Neither wget nor curl is available"
+        return 1
+    fi
+    
+    # Install kubectl
+    chmod +x /tmp/kubectl
+    if [[ $EUID -eq 0 ]]; then
+        mv /tmp/kubectl /usr/local/bin/kubectl
+    else
+        log_info "Installing kubectl to user directory..."
+        mkdir -p "$HOME/.local/bin"
+        mv /tmp/kubectl "$HOME/.local/bin/kubectl"
+        export PATH="$HOME/.local/bin:$PATH"
+        log_warning "kubectl installed to $HOME/.local/bin/"
+        log_warning "Make sure $HOME/.local/bin is in your PATH"
+    fi
+    
+    # Verify installation
+    if kubectl version --client &>/dev/null; then
+        log_success "kubectl installed successfully"
+        kubectl version --client --short
+        return 0
+    else
+        log_error "kubectl installation failed"
+        return 1
+    fi
+}
+
+# Function to install helm
+install_helm() {
+    log_info "Installing helm..."
+    
+    local system=$(detect_system)
+    if [[ -z "$system" ]]; then
+        return 1
+    fi
+    
+    # Download helm installation script
+    local helm_script="/tmp/get_helm.sh"
+    
+    if command -v wget &> /dev/null; then
+        wget -q -O "$helm_script" https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    elif command -v curl &> /dev/null; then
+        curl -fsSL -o "$helm_script" https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    else
+        log_error "Neither wget nor curl is available"
+        return 1
+    fi
+    
+    chmod 700 "$helm_script"
+    
+    # Install helm
+    if [[ $EUID -eq 0 ]]; then
+        bash "$helm_script"
+    else
+        # Install to user directory
+        HELM_INSTALL_DIR="$HOME/.local/bin" bash "$helm_script" --no-sudo
+        export PATH="$HOME/.local/bin:$PATH"
+        log_warning "helm installed to $HOME/.local/bin/"
+        log_warning "Make sure $HOME/.local/bin is in your PATH"
+    fi
+    
+    rm -f "$helm_script"
+    
+    # Verify installation
+    if helm version &>/dev/null; then
+        log_success "helm installed successfully"
+        helm version --short
+        return 0
+    else
+        log_error "helm installation failed"
+        return 1
+    fi
+}
+
+# Function to install yq
+install_yq() {
+    log_info "Installing yq..."
+    
+    local system=$(detect_system)
+    if [[ -z "$system" ]]; then
+        return 1
+    fi
+    
+    # Get latest version
+    local version=$(curl -s https://api.github.com/repos/mikefarah/yq/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -z "$version" ]]; then
+        version="v4.35.2"  # Fallback version
+    fi
+    
+    log_info "Installing yq version: $version"
+    
+    # Download yq
+    local binary_name="yq_${system}"
+    local url="https://github.com/mikefarah/yq/releases/download/${version}/${binary_name}"
+    
+    if command -v wget &> /dev/null; then
+        wget -q -O /tmp/yq "$url"
+    elif command -v curl &> /dev/null; then
+        curl -L -s -o /tmp/yq "$url"
+    else
+        log_error "Neither wget nor curl is available"
+        return 1
+    fi
+    
+    # Install yq
+    chmod +x /tmp/yq
+    if [[ $EUID -eq 0 ]]; then
+        mv /tmp/yq /usr/local/bin/yq
+    else
+        log_info "Installing yq to user directory..."
+        mkdir -p "$HOME/.local/bin"
+        mv /tmp/yq "$HOME/.local/bin/yq"
+        export PATH="$HOME/.local/bin:$PATH"
+        log_warning "yq installed to $HOME/.local/bin/"
+        log_warning "Make sure $HOME/.local/bin is in your PATH"
+    fi
+    
+    # Verify installation
+    if yq --version &>/dev/null; then
+        log_success "yq installed successfully"
+        yq --version
+        return 0
+    else
+        log_error "yq installation failed"
+        return 1
+    fi
+}
+
+# Function to check and install dependencies
+check_and_install_dependencies() {
+    log_header "Checking Dependencies"
+    
+    local deps_missing=false
+    
+    # Check kubectl
+    if ! command -v kubectl &> /dev/null; then
+        log_warning "kubectl is not installed"
+        if [[ "${INSTALL_DEPS:-true}" == "true" ]]; then
+            install_kubectl || deps_missing=true
+        else
+            deps_missing=true
+        fi
+    else
+        log_success "kubectl is available: $(kubectl version --client --short 2>/dev/null || kubectl version --client -o json | jq -r .clientVersion.gitVersion)"
+    fi
+    
+    # Check helm
+    if ! command -v helm &> /dev/null; then
+        log_warning "helm is not installed"
+        if [[ "${INSTALL_DEPS:-true}" == "true" ]]; then
+            install_helm || deps_missing=true
+        else
+            deps_missing=true
+        fi
+    else
+        log_success "helm is available: $(helm version --short)"
+    fi
+    
+    # Check yq
+    if ! command -v yq &> /dev/null; then
+        log_warning "yq is not installed"
+        if [[ "${INSTALL_DEPS:-true}" == "true" ]]; then
+            install_yq || deps_missing=true
+        else
+            deps_missing=true
+        fi
+    else
+        log_success "yq is available: $(yq --version)"
+    fi
+    
+    # Check other common dependencies
+    local required_commands=("docker" "git" "jq")
+    for cmd in "${required_commands[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            log_warning "$cmd is not installed"
+            deps_missing=true
+        else
+            log_success "$cmd is available"
+        fi
+    done
+    
+    if [[ "$deps_missing" == "true" ]]; then
+        log_error "Some dependencies are missing"
+        log_info "To disable automatic installation, set INSTALL_DEPS=false"
+        if [[ "${INSTALL_DEPS:-true}" != "true" ]]; then
+            log_info "Please install missing dependencies manually"
+            return 1
+        fi
+    else
+        log_success "All dependencies are satisfied"
+    fi
+    
+    # Update PATH if needed
+    if [[ -d "$HOME/.local/bin" ]] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
+    
+    return 0
+}
+
 # Function to detect host IP if RF_LOCAL_REGISTRY not set
 detect_host_ip() {
     local host_ip=""
@@ -92,6 +343,7 @@ USAGE:
     $0 [cluster-type] [command] [options]
     $0 test-all [options]
     $0 deploy-rapidfort [cluster-type] [options]
+    $0 check-deps
     $0 help
 
 CLUSTER TYPES:
@@ -113,6 +365,7 @@ COMMANDS:
 SPECIAL COMMANDS:
     test-all        - Test all cluster types sequentially
     list            - List all supported cluster types
+    check-deps      - Check and install missing dependencies
     help            - Show this help message
 
 OPTIONS:
@@ -124,8 +377,16 @@ OPTIONS:
     --strict           For zuul: Apply strict security policies
     --local-registry   Use local registry for RapidFort images
     --image-tag        Tag for RapidFort images (e.g., 3.1.32-dev6)
+    --no-deps          Don't automatically install missing dependencies
+
+ENVIRONMENT VARIABLES:
+    RF_LOCAL_REGISTRY  - Registry IP address (auto-detected if not set)
+    INSTALL_DEPS       - Set to 'false' to disable automatic dependency installation
 
 EXAMPLES:
+    # Check and install dependencies
+    $0 check-deps
+    
     # Install k0s cluster
     $0 k0s install
     
@@ -162,7 +423,7 @@ REQUIREMENTS:
     - Docker for kind/minikube
     - Each cluster's play.sh in respective folder
     - RapidFort credentials in ~/.rapidfort/credentials
-    - Helm installed for RapidFort Runtime deployment
+    - kubectl, helm, yq (will be installed automatically if missing)
 
 EOF
 }
@@ -324,14 +585,7 @@ deploy_rapidfort_runtime() {
         log_info "Visit: https://helm.sh/docs/intro/install/"
         return 1
     fi
-    
-    # Check if credentials exist
-    if [[ ! -f "$HOME/.rapidfort/credentials" ]]; then
-        log_warning "RapidFort credentials not found at ~/.rapidfort/credentials"
-        log_warning "Skipping RapidFort runtime deployment"
-        return 1
-    fi
-    
+        
     # Get registry IP
     local registry_ip=""
     if [[ -n "$RF_LOCAL_REGISTRY" ]]; then
@@ -349,10 +603,12 @@ deploy_rapidfort_runtime() {
     log_info "Using registry IP: $registry_ip"
     
     local creds_file="$HOME/.rapidfort/credentials"
-    export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
-    export RF_SECRET_ACCESS_KEY=$(grep "secret_key" "$creds_file" | cut -d'=' -f2 | xargs)
-    export RF_ROOT_URL=$(grep "rf_root_url" "$creds_file" | cut -d'=' -f2 | xargs)
-    
+    if [[ -f "$creds_file" ]]; then
+        export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
+        export RF_SECRET_ACCESS_KEY=$(grep "secret_key" "$creds_file" | cut -d'=' -f2 | xargs)
+        export RF_ROOT_URL=$(grep "rf_root_url" "$creds_file" | cut -d'=' -f2 | xargs)
+    fi
+
     if [[ -z "$RF_ACCESS_ID" ]] || [[ -z "$RF_SECRET_ACCESS_KEY" ]] || [[ -z "$RF_ROOT_URL" ]]; then
         log_error "Invalid or incomplete RapidFort credentials"
         return 1
@@ -481,7 +737,7 @@ run_coverage_test() {
     
     # Wait for all pods to be ready after coverage deployment
     log_info "Waiting for all coverage test pods to be ready..."
-    wait_for_pods_ready 600
+    wait_for_pods_ready 900
     
     log_success "Coverage test completed"
     return 0
@@ -683,6 +939,7 @@ main() {
     local strict_mode="false"
     local use_local_registry="false"
     local image_tag=""
+    local skip_deps_check="false"
     
     # Check for special commands first
     case "$command" in
@@ -694,10 +951,19 @@ main() {
             list_clusters
             exit 0
             ;;
+        check-deps)
+            check_and_install_dependencies
+            exit $?
+            ;;
         deploy-rapidfort)
             shift
             cluster_type="${1:-}"
             shift || true
+            
+            # Check dependencies first
+            if [[ "$skip_deps_check" != "true" ]]; then
+                check_and_install_dependencies || exit 1
+            fi
             
             # Check if we have a working kubectl
             if ! kubectl cluster-info &>/dev/null; then
@@ -722,9 +988,15 @@ main() {
                     --timeout) timeout="$2"; shift 2 ;;
                     --local-registry) extra_args+=("--local-registry"); shift ;;
                     --image-tag) extra_args+=("--image-tag" "$2"); shift 2 ;;
+                    --no-deps) skip_deps_check="true"; shift ;;
                     *) log_error "Unknown option: $1"; exit 1 ;;
                 esac
             done
+            
+            # Check dependencies first
+            if [[ "$skip_deps_check" != "true" ]]; then
+                check_and_install_dependencies || exit 1
+            fi
             
             # Set RF_LOCAL_REGISTRY if not set
             if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
@@ -776,9 +1048,15 @@ main() {
                 ;;
             --local-registry) extra_args+=("--local-registry"); shift ;;
             --image-tag) extra_args+=("--image-tag" "$2"); shift 2 ;;
+            --no-deps) skip_deps_check="true"; shift ;;
             *) extra_args+=("$1"); shift ;;
         esac
     done
+    
+    # Check dependencies first (unless explicitly skipped)
+    if [[ "$skip_deps_check" != "true" ]] && [[ "$command" != "help" ]] && [[ "$command" != "--help" ]] && [[ "$command" != "-h" ]]; then
+        check_and_install_dependencies || exit 1
+    fi
     
     # Execute command
     case "$command" in
@@ -835,7 +1113,7 @@ main() {
 
 # Check if running with sudo when needed
 check_sudo() {
-    if [[ $EUID -ne 0 ]] && [[ "$1" != "help" ]] && [[ "$1" != "list" ]] && [[ "$1" != "--help" ]] && [[ "$1" != "-h" ]]; then
+    if [[ $EUID -ne 0 ]] && [[ "$1" != "help" ]] && [[ "$1" != "list" ]] && [[ "$1" != "--help" ]] && [[ "$1" != "-h" ]] && [[ "$1" != "check-deps" ]]; then
         log_warning "Most operations require root privileges"
         log_info "Consider running with: sudo $0 $@"
     fi
