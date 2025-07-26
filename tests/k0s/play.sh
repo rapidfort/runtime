@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Script configuration
-K0S_VERSION=${K0S_VERSION:-"v1.28.5+k0s.0"}  # Specific stable version
+K0S_VERSION=${K0S_VERSION:-"v1.33.3+k0s.0"}  # Specific stable version
 INSTALL_TYPE=${INSTALL_TYPE:-"single"}
 KUBECONFIG_PATH="$HOME/.kube/config"
 K0S_BINARY="/usr/local/bin/k0s"
@@ -106,7 +106,7 @@ USAGE:
 
 COMMANDS:
     install         Install k0s cluster with registry, ingress, and RapidFort Runtime
-    uninstall       Remove everything completely
+    uninstall       Remove everything completely (including iptables cleanup)
     status          Show k0s and registry status
     debug           Show debugging information
     deploy-rapidfort Deploy RapidFort Runtime to existing k0s cluster
@@ -114,7 +114,6 @@ COMMANDS:
 
 OPTIONS:
     --registry-ip   IP address for registry (optional, defaults to RF_LOCAL_REGISTRY)
-    --skip-iptables Skip iptables cleanup (use with caution)
     --local-registry Use local registry for RapidFort images
     --image-tag     Tag for RapidFort images (e.g., 3.1.32-dev6)
     -h, --help      Show this help
@@ -129,13 +128,13 @@ EXAMPLES:
     $0 uninstall
 
 WHAT IT DOES:
-    - Cleans iptables rules from previous installations
     - Installs k0s single-node cluster
     - Deploys container registry on IP:5000 (HTTP)
     - Sets up ingress controller
     - Configures containerd for registry access
     - Includes local-path storage provisioner
     - Automatically deploys RapidFort Runtime if credentials found
+    - Cleans up k8s-specific iptables rules on uninstall
 
 REGISTRY IP DETECTION:
     - If --registry-ip not provided, uses RF_LOCAL_REGISTRY env var
@@ -202,58 +201,88 @@ save_iptables() {
     echo "$backup_file"
 }
 
-# Function to clean iptables rules
+# Function to clean iptables rules (safer version - only k8s/k0s specific)
 clean_iptables() {
-    log_info "Cleaning iptables rules..."
+    log_info "Cleaning k8s/k0s specific iptables rules..."
     
     # Save current rules for debugging
     local backup_file=$(save_iptables)
     log_info "Current rules backed up to: $backup_file"
     
-    # Flush all chains
-    log_info "Flushing all iptables chains..."
-    iptables -F 2>/dev/null || true
-    iptables -t nat -F 2>/dev/null || true
-    iptables -t mangle -F 2>/dev/null || true
-    iptables -t raw -F 2>/dev/null || true
+    # Clean up k8s/k0s specific rules from default chains
+    log_info "Removing k8s/k0s rules from default chains..."
     
-    # Delete all custom chains
-    log_info "Deleting custom chains..."
-    iptables -X 2>/dev/null || true
-    iptables -t nat -X 2>/dev/null || true
-    iptables -t mangle -X 2>/dev/null || true
-    iptables -t raw -X 2>/dev/null || true
-    
-    # Reset policies to ACCEPT
-    log_info "Resetting default policies to ACCEPT..."
-    iptables -P INPUT ACCEPT 2>/dev/null || true
-    iptables -P FORWARD ACCEPT 2>/dev/null || true
-    iptables -P OUTPUT ACCEPT 2>/dev/null || true
-    
-    # Remove k8s/k0s specific chains if they exist
-    for chain in KUBE-SERVICES KUBE-NODEPORTS KUBE-POSTROUTING KUBE-MARK-MASQ KUBE-MARK-DROP KUBE-FORWARD KUBE-KUBELET-CANARY; do
-        iptables -t nat -F $chain 2>/dev/null || true
-        iptables -t nat -X $chain 2>/dev/null || true
+    # Remove KUBE-* and CNI-* jumps from default chains
+    for table in filter nat mangle; do
+        # Get all rules with KUBE- or CNI- references
+        iptables -t $table -S 2>/dev/null | grep -E "(KUBE-|CNI-|cali-|kube-)" | while read -r rule; do
+            # Convert -A to -D to delete the rule
+            if [[ "$rule" =~ ^-A ]]; then
+                del_rule=$(echo "$rule" | sed 's/^-A /-D /')
+                iptables -t $table $del_rule 2>/dev/null || true
+            fi
+        done
     done
     
-    for chain in KUBE-FORWARD KUBE-FIREWALL KUBE-KUBELET-CANARY KUBE-PROXY-CANARY; do
-        iptables -F $chain 2>/dev/null || true
-        iptables -X $chain 2>/dev/null || true
+    # Clean nat table k8s chains
+    log_info "Cleaning Kubernetes NAT chains..."
+    for chain in KUBE-SERVICES KUBE-NODEPORTS KUBE-POSTROUTING KUBE-MARK-MASQ KUBE-MARK-DROP KUBE-FORWARD KUBE-KUBELET-CANARY KUBE-PROXY-CANARY KUBE-SEP-* KUBE-SVC-* KUBE-FW-* KUBE-EXT-*; do
+        # List all chains and filter for our pattern
+        iptables -t nat -L -n 2>/dev/null | grep "^Chain $chain" | awk '{print $2}' | while read -r found_chain; do
+            if [[ "$found_chain" =~ ^KUBE- ]]; then
+                log_info "Removing NAT chain: $found_chain"
+                iptables -t nat -F "$found_chain" 2>/dev/null || true
+                iptables -t nat -X "$found_chain" 2>/dev/null || true
+            fi
+        done
+    done
+    
+    # Clean filter table k8s chains
+    log_info "Cleaning Kubernetes filter chains..."
+    for chain in KUBE-FORWARD KUBE-FIREWALL KUBE-KUBELET-CANARY KUBE-PROXY-CANARY KUBE-EXTERNAL-SERVICES KUBE-SERVICES KUBE-NODEPORTS; do
+        if iptables -L "$chain" &>/dev/null 2>&1; then
+            log_info "Removing filter chain: $chain"
+            iptables -F "$chain" 2>/dev/null || true
+            iptables -X "$chain" 2>/dev/null || true
+        fi
     done
     
     # Clean up CNI chains
-    for chain in CNI-FORWARD CNI-ISOLATION-STAGE-1 CNI-ISOLATION-STAGE-2; do
-        iptables -F $chain 2>/dev/null || true
-        iptables -X $chain 2>/dev/null || true
+    log_info "Cleaning CNI chains..."
+    for chain in CNI-FORWARD CNI-ISOLATION-STAGE-1 CNI-ISOLATION-STAGE-2 CNI-*; do
+        # List all chains and filter for CNI pattern
+        iptables -L -n 2>/dev/null | grep "^Chain CNI-" | awk '{print $2}' | while read -r found_chain; do
+            log_info "Removing CNI chain: $found_chain"
+            iptables -F "$found_chain" 2>/dev/null || true
+            iptables -X "$found_chain" 2>/dev/null || true
+        done
     done
     
-    # Restart networking to ensure clean state
-    if command -v systemctl &> /dev/null; then
-        systemctl restart systemd-networkd 2>/dev/null || true
-        systemctl restart NetworkManager 2>/dev/null || true
-    fi
+    # Clean up Calico chains if present
+    log_info "Cleaning Calico chains if present..."
+    for table in filter nat mangle raw; do
+        iptables -t $table -L -n 2>/dev/null | grep "^Chain cali-" | awk '{print $2}' | while read -r found_chain; do
+            log_info "Removing Calico chain from $table: $found_chain"
+            iptables -t $table -F "$found_chain" 2>/dev/null || true
+            iptables -t $table -X "$found_chain" 2>/dev/null || true
+        done
+    done
     
-    log_success "iptables rules cleaned"
+    # Clean up any k0s-specific interfaces
+    log_info "Cleaning up k8s/k0s network interfaces..."
+    for iface in kube-bridge cni0 flannel.1 vxlan.calico veth* cali*; do
+        # Use more careful matching
+        ip link show 2>/dev/null | grep -E "^[0-9]+: ($iface)" | awk -F: '{print $2}' | tr -d ' ' | while read -r found_iface; do
+            if [[ "$found_iface" =~ ^(kube-|cni|flannel|vxlan\.calico|veth|cali) ]]; then
+                log_info "Removing interface: $found_iface"
+                ip link set "$found_iface" down 2>/dev/null || true
+                ip link delete "$found_iface" 2>/dev/null || true
+            fi
+        done
+    done
+    
+    log_success "k0s/k8s specific iptables rules cleaned"
+    log_info "Note: General system iptables rules were preserved"
 }
 
 # Function to check for existing kubeconfig
@@ -721,13 +750,6 @@ install_all() {
     check_requirements
     check_existing_kubeconfig
     
-    # Clean iptables before installation
-    if [[ "$SKIP_IPTABLES" != "true" ]]; then
-        clean_iptables
-    else
-        log_warning "Skipping iptables cleanup (--skip-iptables specified)"
-    fi
-    
     if is_k0s_installed && is_k0s_running; then
         log_warning "k0s already running"
         show_status
@@ -1018,13 +1040,6 @@ EOF
     echo "  # Check status: $0 status"
     echo "  # Debug issues: $0 debug"
     echo "  # Watch pods: watch kubectl get pods -A"
-    
-    if [[ "$SKIP_IPTABLES" != "true" ]]; then
-        echo ""
-        log_info "iptables backup:"
-        echo "  # Backups are saved in /tmp/iptables-backup-*.rules"
-        echo "  # To restore: iptables-restore < /tmp/iptables-backup-*.rules"
-    fi
 }
 
 # Function to uninstall everything
@@ -1052,12 +1067,8 @@ uninstall_all() {
         systemctl disable k0scontroller 2>/dev/null || true
     fi
     
-    # Clean iptables rules unless skipped
-    if [[ "$SKIP_IPTABLES" != "true" ]]; then
-        clean_iptables
-    else
-        log_warning "Skipping iptables cleanup (--skip-iptables specified)"
-    fi
+    # Clean iptables rules - only on uninstall
+    clean_iptables
     
     # Remove any remaining network interfaces
     log_info "Cleaning up network interfaces..."
@@ -1077,13 +1088,13 @@ uninstall_all() {
     fi
     
     log_success "Uninstall completed"
+    log_info "iptables rules have been cleaned. Backup saved in /tmp/iptables-backup-*.rules"
 }
 
 # Main function
 main() {
     local command="${1:-help}"
     local registry_ip=""
-    local skip_iptables=false
     
     shift || true
     
@@ -1093,10 +1104,6 @@ main() {
             --registry-ip)
                 registry_ip="$2"
                 shift 2
-                ;;
-            --skip-iptables)
-                skip_iptables=true
-                shift
                 ;;
             -h|--help)
                 show_help
@@ -1108,9 +1115,6 @@ main() {
                 ;;
         esac
     done
-    
-    # Export for use in functions
-    export SKIP_IPTABLES=$skip_iptables
     
     case "$command" in
         "install")

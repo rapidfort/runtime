@@ -178,7 +178,7 @@ install_kubectl() {
     # Verify installation
     if kubectl version --client &>/dev/null; then
         log_success "kubectl installed successfully"
-        kubectl version --client --short
+        kubectl version --client
         return 0
     else
         log_error "kubectl installation failed"
