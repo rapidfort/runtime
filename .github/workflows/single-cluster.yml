@@ -27,6 +27,7 @@ jobs:
       run: |
         # Setup
         pip install linode-cli
+        sudo apt-get update && sudo apt-get install -y sshpass
         mkdir -p ~/.config
         echo -e "[DEFAULT]\ntoken = ${LINODE_TOKEN}\n" > ~/.config/linode-cli
         
@@ -42,10 +43,28 @@ jobs:
           --booted true \
           --text --no-headers --format 'id')
         
+        if [ -z "$vm_id" ] || ! [[ "$vm_id" =~ ^[0-9]+$ ]]; then
+          echo "Failed to create VM"
+          exit 1
+        fi
+        
+        echo "Created VM ID: $vm_id"
+        
         # Wait and get IP
-        sleep 60
+        sleep 30
         ip=$(linode-cli linodes view $vm_id --no-defaults --text --no-headers --format 'ipv4' | awk '{print $1}')
         echo "VM ready at $ip"
+        
+        # Wait for SSH to be ready
+        echo "Waiting for SSH..."
+        for i in {1..60}; do
+          if sshpass -p "${{ secrets.VM_ROOT_PASSWORD }}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@$ip "echo SSH ready" 2>/dev/null; then
+            echo "SSH is ready!"
+            break
+          fi
+          echo "Waiting for SSH... ($i/60)"
+          sleep 5
+        done
         
         # Run tests with credentials
         sshpass -p "${{ secrets.VM_ROOT_PASSWORD }}" ssh -o StrictHostKeyChecking=no root@$ip << 'EOF'
@@ -74,4 +93,3 @@ jobs:
         
         # If we get here, tests passed - destroy VM
         linode-cli linodes delete $vm_id --no-defaults
-
