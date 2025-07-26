@@ -74,9 +74,72 @@ detect_system() {
     echo "${os}-${arch}"
 }
 
+# Function to ensure curl or wget is available
+ensure_download_tool() {
+    if command -v curl &> /dev/null || command -v wget &> /dev/null; then
+        return 0
+    fi
+    
+    log_warning "Neither curl nor wget is available, attempting to install curl..."
+    
+    # Check if we're on macOS
+    local system=$(detect_system)
+    if [[ "$system" == darwin-* ]]; then
+        log_info "macOS should have curl installed by default"
+        log_info "If not, install via Homebrew: brew install curl"
+        return 1
+    fi
+    
+    if [[ $EUID -ne 0 ]]; then
+        log_error "Installing curl requires root privileges"
+        log_info "Please run with sudo or install curl/wget manually"
+        return 1
+    fi
+    
+    # Detect the Linux distribution
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        local distro=$ID
+    else
+        log_error "Cannot detect Linux distribution"
+        return 1
+    fi
+    
+    case "$distro" in
+        ubuntu|debian)
+            apt-get update -qq && apt-get install -y curl
+            ;;
+        rhel|centos|fedora)
+            yum install -y curl || dnf install -y curl
+            ;;
+        alpine)
+            apk add --no-cache curl
+            ;;
+        arch)
+            pacman -S --noconfirm curl
+            ;;
+        *)
+            log_error "Unsupported distribution: $distro"
+            log_info "Please install curl or wget manually"
+            return 1
+            ;;
+    esac
+    
+    if command -v curl &> /dev/null; then
+        log_success "curl installed successfully"
+        return 0
+    else
+        log_error "Failed to install curl"
+        return 1
+    fi
+}
+
 # Function to install kubectl
 install_kubectl() {
     log_info "Installing kubectl..."
+    
+    # Ensure we have curl or wget
+    ensure_download_tool || return 1
     
     local system=$(detect_system)
     if [[ -z "$system" ]]; then
@@ -127,6 +190,9 @@ install_kubectl() {
 install_helm() {
     log_info "Installing helm..."
     
+    # Ensure we have curl or wget
+    ensure_download_tool || return 1
+    
     local system=$(detect_system)
     if [[ -z "$system" ]]; then
         return 1
@@ -173,6 +239,9 @@ install_helm() {
 # Function to install yq
 install_yq() {
     log_info "Installing yq..."
+    
+    # Ensure we have curl or wget
+    ensure_download_tool || return 1
     
     local system=$(detect_system)
     if [[ -z "$system" ]]; then
@@ -224,6 +293,256 @@ install_yq() {
     fi
 }
 
+# Function to install jq
+install_jq() {
+    log_info "Installing jq..."
+    
+    # Ensure we have curl or wget
+    ensure_download_tool || return 1
+    
+    local system=$(detect_system)
+    if [[ -z "$system" ]]; then
+        return 1
+    fi
+    
+    # Get latest version
+    local version=$(curl -s https://api.github.com/repos/jqlang/jq/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -z "$version" ]]; then
+        version="jq-1.7.1"  # Fallback version
+    fi
+    
+    log_info "Installing jq version: $version"
+    
+    # Build download URL based on system
+    local url=""
+    case "$system" in
+        linux-amd64) url="https://github.com/jqlang/jq/releases/download/${version}/jq-linux-amd64" ;;
+        linux-arm64) url="https://github.com/jqlang/jq/releases/download/${version}/jq-linux-arm64" ;;
+        darwin-amd64) url="https://github.com/jqlang/jq/releases/download/${version}/jq-macos-amd64" ;;
+        darwin-arm64) url="https://github.com/jqlang/jq/releases/download/${version}/jq-macos-arm64" ;;
+        *)
+            log_error "Unsupported system for jq: $system"
+            return 1
+            ;;
+    esac
+    
+    if command -v wget &> /dev/null; then
+        wget -q -O /tmp/jq "$url"
+    elif command -v curl &> /dev/null; then
+        curl -L -s -o /tmp/jq "$url"
+    else
+        log_error "Neither wget nor curl is available"
+        return 1
+    fi
+    
+    # Install jq
+    chmod +x /tmp/jq
+    if [[ $EUID -eq 0 ]]; then
+        mv /tmp/jq /usr/local/bin/jq
+    else
+        log_info "Installing jq to user directory..."
+        mkdir -p "$HOME/.local/bin"
+        mv /tmp/jq "$HOME/.local/bin/jq"
+        export PATH="$HOME/.local/bin:$PATH"
+        log_warning "jq installed to $HOME/.local/bin/"
+        log_warning "Make sure $HOME/.local/bin is in your PATH"
+    fi
+    
+    # Verify installation
+    if jq --version &>/dev/null; then
+        log_success "jq installed successfully"
+        jq --version
+        return 0
+    else
+        log_error "jq installation failed"
+        return 1
+    fi
+}
+
+# Function to install git
+install_git() {
+    log_info "Installing git..."
+    
+    # Check if we're on macOS
+    local system=$(detect_system)
+    if [[ "$system" == darwin-* ]]; then
+        log_info "For macOS, please install git via:"
+        log_info "  - Xcode Command Line Tools: xcode-select --install"
+        log_info "  - Or Homebrew: brew install git"
+        return 1
+    fi
+    
+    if [[ $EUID -ne 0 ]]; then
+        log_error "Git installation requires root privileges"
+        log_info "Please run with sudo or install git manually"
+        return 1
+    fi
+    
+    # Detect the Linux distribution
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        local distro=$ID
+    else
+        log_error "Cannot detect Linux distribution"
+        return 1
+    fi
+    
+    case "$distro" in
+        ubuntu|debian)
+            log_info "Installing git on Ubuntu/Debian..."
+            apt-get update -qq
+            apt-get install -y git
+            ;;
+        rhel|centos|fedora)
+            log_info "Installing git on RHEL/CentOS/Fedora..."
+            yum install -y git || dnf install -y git
+            ;;
+        alpine)
+            log_info "Installing git on Alpine..."
+            apk add --no-cache git
+            ;;
+        arch)
+            log_info "Installing git on Arch..."
+            pacman -S --noconfirm git
+            ;;
+        *)
+            log_error "Unsupported distribution: $distro"
+            log_info "Please install git manually"
+            return 1
+            ;;
+    esac
+    
+    # Verify installation
+    if command -v git &>/dev/null; then
+        log_success "git installed successfully"
+        git --version
+        return 0
+    else
+        log_error "git installation failed"
+        return 1
+    fi
+}
+
+# Function to install docker
+install_docker() {
+    log_info "Installing Docker..."
+    
+    if [[ $EUID -ne 0 ]]; then
+        log_error "Docker installation requires root privileges"
+        log_info "Please run with sudo or install Docker manually"
+        return 1
+    fi
+    
+    # Detect the system
+    local system=$(detect_system)
+    if [[ -z "$system" ]]; then
+        return 1
+    fi
+    
+    # For macOS, provide instructions
+    if [[ "$system" == darwin-* ]]; then
+        log_info "For macOS, please install Docker Desktop from:"
+        log_info "https://docs.docker.com/desktop/install/mac-install/"
+        return 1
+    fi
+    
+    # For Linux, detect distribution
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        local distro=$ID
+    else
+        log_error "Cannot detect Linux distribution"
+        return 1
+    fi
+    
+    case "$distro" in
+        ubuntu|debian)
+            log_info "Installing Docker on Ubuntu/Debian..."
+            
+            # Remove old versions
+            apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+            
+            # Install prerequisites
+            apt-get update -qq
+            apt-get install -y \
+                ca-certificates \
+                curl \
+                gnupg \
+                lsb-release
+            
+            # Add Docker's official GPG key
+            mkdir -p /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/$distro/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+            
+            # Set up the repository
+            echo \
+                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$distro \
+                $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+            
+            # Install Docker Engine
+            apt-get update -qq
+            apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            ;;
+            
+        rhel|centos|fedora)
+            log_info "Installing Docker on RHEL/CentOS/Fedora..."
+            
+            # Remove old versions
+            yum remove -y docker docker-client docker-client-latest docker-common \
+                docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
+            
+            # Install prerequisites
+            yum install -y yum-utils
+            
+            # Set up the repository
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            
+            # Install Docker Engine
+            yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            ;;
+            
+        alpine)
+            log_info "Installing Docker on Alpine..."
+            apk add --no-cache docker docker-cli docker-compose-plugin
+            rc-update add docker boot
+            service docker start
+            ;;
+            
+        arch)
+            log_info "Installing Docker on Arch..."
+            pacman -S --noconfirm docker docker-compose
+            ;;
+            
+        *)
+            log_error "Unsupported distribution: $distro"
+            log_info "Please install Docker manually following:"
+            log_info "https://docs.docker.com/engine/install/"
+            return 1
+            ;;
+    esac
+    
+    # Start and enable Docker
+    systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true
+    systemctl enable docker 2>/dev/null || true
+    
+    # Add current user to docker group (if not root)
+    if [[ -n "$SUDO_USER" ]]; then
+        usermod -aG docker "$SUDO_USER"
+        log_info "Added $SUDO_USER to docker group"
+        log_warning "You may need to log out and back in for group changes to take effect"
+    fi
+    
+    # Verify installation
+    if docker --version &>/dev/null; then
+        log_success "Docker installed successfully"
+        docker --version
+        return 0
+    else
+        log_error "Docker installation failed"
+        return 1
+    fi
+}
+
 # Function to check and install dependencies
 check_and_install_dependencies() {
     log_header "Checking Dependencies"
@@ -266,31 +585,107 @@ check_and_install_dependencies() {
         log_success "yq is available: $(yq --version)"
     fi
     
-    # Check other common dependencies
-    local required_commands=("docker" "git" "jq")
-    for cmd in "${required_commands[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
-            log_warning "$cmd is not installed"
-            deps_missing=true
+    # Check jq
+    if ! command -v jq &> /dev/null; then
+        log_warning "jq is not installed"
+        if [[ "${INSTALL_DEPS:-true}" == "true" ]]; then
+            install_jq || deps_missing=true
         else
-            log_success "$cmd is available"
+            deps_missing=true
         fi
-    done
+    else
+        log_success "jq is available: $(jq --version)"
+    fi
+    
+    # Check git
+    if ! command -v git &> /dev/null; then
+        log_warning "git is not installed"
+        if [[ "${INSTALL_DEPS:-true}" == "true" ]]; then
+            install_git || deps_missing=true
+        else
+            deps_missing=true
+        fi
+    else
+        log_success "git is available: $(git --version)"
+    fi
+    
+    # Check docker
+    if ! command -v docker &> /dev/null; then
+        log_warning "docker is not installed"
+        log_info "Docker is required for kind and minikube clusters"
+        if [[ "${INSTALL_DEPS:-true}" == "true" ]]; then
+            install_docker || {
+                log_warning "Docker installation failed or requires manual steps"
+                deps_missing=true
+            }
+        else
+            deps_missing=true
+        fi
+    else
+        log_success "docker is available: $(docker --version)"
+        # Check if Docker daemon is running
+        if ! docker info &>/dev/null; then
+            log_warning "Docker daemon is not running"
+            if [[ $EUID -eq 0 ]]; then
+                log_info "Attempting to start Docker..."
+                systemctl start docker 2>/dev/null || service docker start 2>/dev/null || {
+                    log_error "Failed to start Docker daemon"
+                    deps_missing=true
+                }
+            else
+                log_warning "Please start Docker daemon with: sudo systemctl start docker"
+                deps_missing=true
+            fi
+        fi
+    fi
+    
+    # Check for curl or wget (needed for downloads)
+    if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
+        log_warning "Neither curl nor wget is installed"
+        if [[ "${INSTALL_DEPS:-true}" == "true" ]]; then
+            ensure_download_tool || {
+                log_error "Failed to install download tools"
+                deps_missing=true
+            }
+        else
+            log_error "Please install curl or wget for downloading files"
+            deps_missing=true
+        fi
+    else
+        if command -v curl &> /dev/null; then
+            log_success "curl is available"
+        fi
+        if command -v wget &> /dev/null; then
+            log_success "wget is available"
+        fi
+    fi
     
     if [[ "$deps_missing" == "true" ]]; then
-        log_error "Some dependencies are missing"
+        log_error "Some dependencies are missing or not properly configured"
         log_info "To disable automatic installation, set INSTALL_DEPS=false"
         if [[ "${INSTALL_DEPS:-true}" != "true" ]]; then
             log_info "Please install missing dependencies manually"
             return 1
         fi
+        log_info "Some dependencies may require manual intervention or system restart"
+        return 1
     else
         log_success "All dependencies are satisfied"
+        
+        # Show Docker group reminder if relevant
+        if command -v docker &> /dev/null && [[ -n "$SUDO_USER" ]] && ! groups "$SUDO_USER" 2>/dev/null | grep -q docker; then
+            log_info "Remember to add your user to the docker group:"
+            echo "  sudo usermod -aG docker $SUDO_USER"
+            echo "  Then log out and back in for the changes to take effect"
+        fi
     fi
     
     # Update PATH if needed
     if [[ -d "$HOME/.local/bin" ]] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
         export PATH="$HOME/.local/bin:$PATH"
+        log_info "Added $HOME/.local/bin to PATH for this session"
+        log_info "To make permanent, add to your shell profile:"
+        echo '  echo "export PATH=$HOME/.local/bin:$PATH" >> ~/.bashrc'
     fi
     
     return 0
@@ -387,6 +782,9 @@ EXAMPLES:
     # Check and install dependencies
     $0 check-deps
     
+    # Check dependencies without installing
+    INSTALL_DEPS=false $0 check-deps
+    
     # Install k0s cluster
     $0 k0s install
     
@@ -420,10 +818,16 @@ EXAMPLES:
 REQUIREMENTS:
     - RF_LOCAL_REGISTRY environment variable must be set (or auto-detected)
     - Root/sudo access for most cluster types
-    - Docker for kind/minikube
+    - Docker for kind/minikube (will be installed automatically if missing)
     - Each cluster's play.sh in respective folder
     - RapidFort credentials in ~/.rapidfort/credentials
-    - kubectl, helm, yq (will be installed automatically if missing)
+    - kubectl, helm, yq, jq, git, docker (will be installed automatically if missing)
+    - curl or wget for downloading files
+
+NOTES:
+    - Dependencies will be automatically installed when missing (disable with INSTALL_DEPS=false)
+    - Docker installation requires root access and may need manual configuration
+    - Non-root installations go to ~/.local/bin - ensure it's in your PATH
 
 EOF
 }
@@ -585,7 +989,7 @@ deploy_rapidfort_runtime() {
         log_info "Visit: https://helm.sh/docs/intro/install/"
         return 1
     fi
-        
+    
     # Get registry IP
     local registry_ip=""
     if [[ -n "$RF_LOCAL_REGISTRY" ]]; then
@@ -603,7 +1007,7 @@ deploy_rapidfort_runtime() {
     log_info "Using registry IP: $registry_ip"
     
     local creds_file="$HOME/.rapidfort/credentials"
-    if [[ -f "$creds_file" ]]; then
+    if [ -f "$creds_file" ]; then
         export RF_ACCESS_ID=$(grep "access_id" "$creds_file" | cut -d'=' -f2 | xargs)
         export RF_SECRET_ACCESS_KEY=$(grep "secret_key" "$creds_file" | cut -d'=' -f2 | xargs)
         export RF_ROOT_URL=$(grep "rf_root_url" "$creds_file" | cut -d'=' -f2 | xargs)
@@ -737,7 +1141,7 @@ run_coverage_test() {
     
     # Wait for all pods to be ready after coverage deployment
     log_info "Waiting for all coverage test pods to be ready..."
-    wait_for_pods_ready 900
+    wait_for_pods_ready 600
     
     log_success "Coverage test completed"
     return 0
@@ -1116,6 +1520,7 @@ check_sudo() {
     if [[ $EUID -ne 0 ]] && [[ "$1" != "help" ]] && [[ "$1" != "list" ]] && [[ "$1" != "--help" ]] && [[ "$1" != "-h" ]] && [[ "$1" != "check-deps" ]]; then
         log_warning "Most operations require root privileges"
         log_info "Consider running with: sudo $0 $@"
+        log_info "Note: Installing dependencies like Docker, git also requires root access"
     fi
 }
 
