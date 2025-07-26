@@ -1,0 +1,359 @@
+name: Complete K8s Test Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      destroy_after_test:
+        description: 'Destroy VMs after testing'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  LINODE_TOKEN: ${{ secrets.LINODE_TOKEN }}
+  GITHUB_PAT: ${{ secrets.GH_PAT }}
+  REPO_URL: "https://github.com/rapidfort/runtime"
+  LINODE_REGION: "us-east"
+  LINODE_TYPE: "g6-standard-2"
+
+jobs:
+  # Phase 1: Create Infrastructure
+  create-vms:
+    runs-on: ubuntu-latest
+    outputs:
+      vm_created: ${{ steps.create.outputs.success }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        pip install linode-cli
+        sudo apt-get update
+        sudo apt-get install -y jq sshpass
+
+    - name: Generate SSH key
+      run: |
+        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N ""
+        echo "SSH key generated"
+
+    - name: Create VMs and Install Runners
+      id: create
+      run: |
+        set -e
+        
+        # K8s distributions
+        K8S_DISTROS=("k0s" "k3s" "kind" "kubeadm" "microk8s" "minikube" "rke" "openshift")
+        
+        echo "Creating VMs..."
+        > vm_inventory.txt
+        
+        for distro in "${K8S_DISTROS[@]}"; do
+          echo "Creating VM for $distro..."
+          
+          # Create VM
+          vm_id=$(linode-cli linodes create \
+            --type $LINODE_TYPE \
+            --region $LINODE_REGION \
+            --image linode/ubuntu22.04 \
+            --label "runner-$distro" \
+            --root_pass "${{ secrets.VM_ROOT_PASSWORD }}" \
+            --booted true \
+            --tags "github-runner,k8s-test,$distro" \
+            --text --no-headers --format 'id' || echo "FAILED")
+          
+          if [ "$vm_id" == "FAILED" ]; then
+            echo "Failed to create VM for $distro"
+            continue
+          fi
+          
+          echo "Created VM $vm_id for $distro"
+          
+          # Wait for VM to be running
+          for i in {1..30}; do
+            status=$(linode-cli linodes view $vm_id --text --no-headers --format 'status')
+            if [ "$status" == "running" ]; then
+              break
+            fi
+            echo "Waiting for VM to start... ($i/30)"
+            sleep 10
+          done
+          
+          # Get IP
+          ip=$(linode-cli linodes view $vm_id --text --no-headers --format 'ipv4' | awk '{print $1}')
+          echo "$distro:$vm_id:$ip" >> vm_inventory.txt
+          
+          echo "VM $distro is at $ip"
+        done
+        
+        echo "success=true" >> $GITHUB_OUTPUT
+        
+    - name: Wait for SSH
+      run: |
+        echo "Waiting for all VMs to accept SSH..."
+        sleep 60
+        
+        while IFS=':' read -r distro vm_id ip; do
+          echo "Checking SSH for $distro at $ip..."
+          for i in {1..30}; do
+            if sshpass -p "${{ secrets.VM_ROOT_PASSWORD }}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@$ip "echo SSH ready" 2>/dev/null; then
+              echo "$distro SSH is ready"
+              break
+            fi
+            echo "Waiting for SSH... ($i/30)"
+            sleep 10
+          done
+        done < vm_inventory.txt
+
+    - name: Install GitHub Runners
+      run: |
+        # Get runner token
+        RUNNER_TOKEN=$(curl -s -X POST \
+          -H "Authorization: token $GITHUB_PAT" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/rapidfort/runtime/actions/runners/registration-token | jq -r .token)
+        
+        echo "Installing runners on all VMs..."
+        
+        while IFS=':' read -r distro vm_id ip; do
+          echo "Installing runner on $distro..."
+          
+          sshpass -p "${{ secrets.VM_ROOT_PASSWORD }}" ssh -o StrictHostKeyChecking=no root@$ip << EOF
+          set -e
+          
+          # Update system
+          apt-get update
+          apt-get install -y curl wget jq docker.io
+          systemctl enable docker
+          systemctl start docker
+          
+          # Create runner user
+          useradd -m -s /bin/bash runner || true
+          usermod -aG sudo runner
+          usermod -aG docker runner
+          echo "runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+          
+          # Install runner
+          su - runner << 'RUNNER_SCRIPT'
+          cd ~
+          mkdir -p actions-runner && cd actions-runner
+          
+          # Download runner
+          RUNNER_VERSION=\$(curl -s https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name | sed 's/v//')
+          curl -o runner.tar.gz -L https://github.com/actions/runner/releases/download/v\${RUNNER_VERSION}/actions-runner-linux-x64-\${RUNNER_VERSION}.tar.gz
+          tar xzf runner.tar.gz
+          rm runner.tar.gz
+          
+          # Configure
+          export RUNNER_ALLOW_RUNASROOT=1
+          ./config.sh --url $REPO_URL --token $RUNNER_TOKEN --name "$distro" --labels "self-hosted,Linux,$distro,k8s" --unattended --replace
+          
+          # Install service
+          sudo ./svc.sh install runner
+          sudo ./svc.sh start
+          RUNNER_SCRIPT
+          
+          # Verify service
+          systemctl is-active actions.runner.rapidfort-runtime.$distro.service
+          echo "Runner installed on $distro"
+          EOF
+        done < vm_inventory.txt
+
+    - name: Upload inventory
+      uses: actions/upload-artifact@v3
+      with:
+        name: vm-inventory
+        path: vm_inventory.txt
+
+    - name: Wait for runners to register
+      run: |
+        echo "Waiting for runners to appear in GitHub..."
+        sleep 30
+        
+        # Check runners
+        for i in {1..10}; do
+          echo "Checking runners... ($i/10)"
+          
+          runners=$(curl -s \
+            -H "Authorization: token $GITHUB_PAT" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/rapidfort/runtime/actions/runners | \
+            jq -r '.runners[] | select(.labels[].name | contains("k8s")) | .name')
+          
+          runner_count=$(echo "$runners" | grep -v '^$' | wc -l)
+          echo "Found $runner_count runners: $runners"
+          
+          if [ "$runner_count" -ge 6 ]; then
+            echo "Runners are ready!"
+            break
+          fi
+          
+          sleep 30
+        done
+
+  # Phase 2: Test runners are working
+  test-connectivity:
+    needs: create-vms
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Check runner status
+      run: |
+        echo "Checking runner status..."
+        
+        curl -s \
+          -H "Authorization: token ${{ secrets.GH_PAT }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/rapidfort/runtime/actions/runners | \
+          jq -r '.runners[] | select(.labels[].name | contains("k8s")) | {name: .name, status: .status}'
+
+  # Phase 3: Deploy K8s on each runner
+  deploy-k3s:
+    needs: [create-vms, test-connectivity]
+    runs-on: [self-hosted, k3s]
+    
+    steps:
+    - name: Install k3s
+      run: |
+        echo "Installing k3s..."
+        curl -sfL https://get.k3s.io | sh -
+        sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=300s
+        sudo k3s kubectl get nodes
+
+  deploy-kind:
+    needs: [create-vms, test-connectivity]
+    runs-on: [self-hosted, kind]
+    
+    steps:
+    - name: Install kind
+      run: |
+        echo "Installing kind..."
+        curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+        chmod +x ./kind
+        sudo mv ./kind /usr/local/bin/kind
+        kind create cluster --wait 5m
+        kubectl get nodes
+
+  deploy-k0s:
+    needs: [create-vms, test-connectivity]
+    runs-on: [self-hosted, k0s]
+    
+    steps:
+    - name: Install k0s
+      run: |
+        echo "Installing k0s..."
+        curl -sSLf https://get.k0s.sh | sudo sh
+        sudo k0s install controller --single
+        sudo k0s start
+        sleep 30
+        sudo k0s kubectl get nodes
+
+  deploy-microk8s:
+    needs: [create-vms, test-connectivity]
+    runs-on: [self-hosted, microk8s]
+    
+    steps:
+    - name: Install microk8s
+      run: |
+        echo "Installing microk8s..."
+        sudo snap install microk8s --classic
+        sudo usermod -a -G microk8s $USER
+        sudo microk8s status --wait-ready
+        sudo microk8s enable dns storage
+        sudo microk8s kubectl get nodes
+
+  deploy-minikube:
+    needs: [create-vms, test-connectivity]
+    runs-on: [self-hosted, minikube]
+    
+    steps:
+    - name: Install minikube
+      run: |
+        echo "Installing minikube..."
+        curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+        sudo install minikube-linux-amd64 /usr/local/bin/minikube
+        minikube start --driver=docker
+        kubectl get nodes
+
+  deploy-kubeadm:
+    needs: [create-vms, test-connectivity]
+    runs-on: [self-hosted, kubeadm]
+    
+    steps:
+    - name: Install kubeadm
+      run: |
+        echo "Installing kubeadm..."
+        sudo swapoff -a
+        
+        # Install dependencies
+        sudo apt-get update
+        sudo apt-get install -y apt-transport-https ca-certificates curl
+        sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+        echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+        sudo apt-get update
+        sudo apt-get install -y kubelet kubeadm kubectl
+        sudo apt-mark hold kubelet kubeadm kubectl
+        
+        # Initialize cluster
+        sudo kubeadm init --pod-network-cidr=10.244.0.0/16
+        
+        # Setup kubeconfig
+        mkdir -p $HOME/.kube
+        sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+        sudo chown $(id -u):$(id -g) $HOME/.kube/config
+        
+        # Install CNI
+        kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+        kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
+        
+        # Wait for ready
+        kubectl wait --for=condition=Ready nodes --all --timeout=300s
+        kubectl get nodes
+
+  # Phase 4: Summary
+  summary:
+    needs: [deploy-k3s, deploy-kind, deploy-k0s, deploy-microk8s, deploy-minikube, deploy-kubeadm]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Summary
+      run: |
+        echo "## Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### VM Creation" >> $GITHUB_STEP_SUMMARY
+        echo "- Status: ${{ needs.create-vms.result }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### K8s Deployments" >> $GITHUB_STEP_SUMMARY
+        echo "| Distribution | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| k3s | ${{ needs.deploy-k3s.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| kind | ${{ needs.deploy-kind.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| k0s | ${{ needs.deploy-k0s.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| microk8s | ${{ needs.deploy-microk8s.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| minikube | ${{ needs.deploy-minikube.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| kubeadm | ${{ needs.deploy-kubeadm.result }} |" >> $GITHUB_STEP_SUMMARY
+
+  # Phase 5: Cleanup (optional)
+  cleanup:
+    needs: summary
+    runs-on: ubuntu-latest
+    if: always() && inputs.destroy_after_test == 'true'
+    
+    steps:
+    - name: Install Linode CLI
+      run: pip install linode-cli
+      
+    - name: Destroy VMs
+      run: |
+        echo "Destroying all test VMs..."
+        vm_ids=$(linode-cli linodes list --tags "github-runner,k8s-test" --text --no-headers --format 'id')
+        
+        for vm_id in $vm_ids; do
+          echo "Destroying VM $vm_id..."
+          linode-cli linodes delete $vm_id
+        done
+        
+        echo "All VMs destroyed"
+
