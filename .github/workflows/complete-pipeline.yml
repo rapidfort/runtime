@@ -161,7 +161,7 @@ jobs:
         done < vm_inventory.txt
 
     - name: Upload inventory
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: vm-inventory
         path: vm_inventory.txt
