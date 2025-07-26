@@ -32,6 +32,10 @@ jobs:
         pip install linode-cli
         sudo apt-get update
         sudo apt-get install -y jq sshpass
+        
+        # Configure linode-cli to skip setup
+        mkdir -p ~/.config
+        echo -e "[DEFAULT]\ntoken = ${LINODE_TOKEN}\n" > ~/.config/linode-cli
 
     - name: Generate SSH key
       run: |
@@ -42,6 +46,9 @@ jobs:
       id: create
       run: |
         set -e
+        
+        # Configure linode-cli
+        export LINODE_CLI_TOKEN="${LINODE_TOKEN}"
         
         # K8s distributions
         K8S_DISTROS=("k0s" "k3s" "kind" "kubeadm" "microk8s" "minikube" "rke" "openshift")
@@ -54,6 +61,7 @@ jobs:
           
           # Create VM
           vm_id=$(linode-cli linodes create \
+            --no-defaults \
             --type $LINODE_TYPE \
             --region $LINODE_REGION \
             --image linode/ubuntu22.04 \
@@ -72,7 +80,7 @@ jobs:
           
           # Wait for VM to be running
           for i in {1..30}; do
-            status=$(linode-cli linodes view $vm_id --text --no-headers --format 'status')
+            status=$(linode-cli linodes view $vm_id --no-defaults --text --no-headers --format 'status')
             if [ "$status" == "running" ]; then
               break
             fi
@@ -81,7 +89,7 @@ jobs:
           done
           
           # Get IP
-          ip=$(linode-cli linodes view $vm_id --text --no-headers --format 'ipv4' | awk '{print $1}')
+          ip=$(linode-cli linodes view $vm_id --no-defaults --text --no-headers --format 'ipv4' | awk '{print $1}')
           echo "$distro:$vm_id:$ip" >> vm_inventory.txt
           
           echo "VM $distro is at $ip"
@@ -346,14 +354,17 @@ jobs:
       run: pip install linode-cli
       
     - name: Destroy VMs
+      env:
+        LINODE_TOKEN: ${{ secrets.LINODE_TOKEN }}
       run: |
         echo "Destroying all test VMs..."
-        vm_ids=$(linode-cli linodes list --tags "github-runner,k8s-test" --text --no-headers --format 'id')
+        export LINODE_CLI_TOKEN="${LINODE_TOKEN}"
+        
+        vm_ids=$(linode-cli linodes list --no-defaults --tags "github-runner,k8s-test" --text --no-headers --format 'id')
         
         for vm_id in $vm_ids; do
           echo "Destroying VM $vm_id..."
-          linode-cli linodes delete $vm_id
+          linode-cli linodes delete $vm_id --no-defaults
         done
         
         echo "All VMs destroyed"
-
