@@ -68,28 +68,68 @@ jobs:
         
         # Run tests with credentials
         sshpass -p "${{ secrets.VM_ROOT_PASSWORD }}" ssh -o StrictHostKeyChecking=no root@$ip << 'EOF'
+        set -e
+        
         # Install dependencies
         apt-get update && apt-get install -y git
         
         # Setup RapidFort credentials
         mkdir -p /root/.rapidfort
+        cat > /root/.rapidfort/credentials << 'CREDS_EOF'
+        access_id=${{ secrets.RF_ACCESS_ID }}
+        secret_key=${{ secrets.RF_SECRET_ACCESS_KEY }}
+        rf_root_url=${{ secrets.RF_ROOT_URL }}
+        CREDS_EOF
+        
         cat > /root/.rapidfort/rapidfort-registry-secret.yaml << 'REGISTRY_EOF'
         ${{ secrets.RF_REGISTRY_SECRET_YAML }}
         REGISTRY_EOF
-        
-        # Export environment variables
-        export RF_ACCESS_ID="${{ secrets.RF_ACCESS_ID }}"
-        export RF_SECRET_ACCESS_KEY="${{ secrets.RF_SECRET_ACCESS_KEY }}"
-        export RF_ROOT_URL="${{ secrets.RF_ROOT_URL }}"
         
         # Clone and run tests
         git clone https://github.com/rapidfort/runtime.git
         cd runtime/tests
         chmod +x master.sh coverage.sh
+        
+        # Install cluster
         ./master.sh ${{ inputs.cluster_type }} install
+        
+        # Set KUBECONFIG based on cluster type
+        case "${{ inputs.cluster_type }}" in
+          k0s)
+            export KUBECONFIG=/root/.kube/config
+            ;;
+          k3s)
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            ;;
+          kind|minikube)
+            export KUBECONFIG=/root/.kube/config
+            ;;
+          *)
+            export KUBECONFIG=/root/.kube/config
+            ;;
+        esac
+        
+        echo "KUBECONFIG set to: $KUBECONFIG"
+        
+        # Verify cluster is ready
+        kubectl cluster-info
+        kubectl get nodes
+        kubectl get pods -A
+        
+        # Deploy RapidFort Runtime
         ./master.sh deploy-rapidfort ${{ inputs.cluster_type }}
+        
+        # Run coverage tests
         ./coverage.sh -m blast -c
+        
+        # Show final status
+        ./master.sh ${{ inputs.cluster_type }} status
         EOF
         
-        # If we get here, tests passed - destroy VM
-        linode-cli linodes delete $vm_id --no-defaults
+        EXIT_CODE=$?
+        
+        # Clean up VM regardless of test result
+        echo "Cleaning up VM..."
+        linode-cli linodes delete $vm_id --no-defaults || true
+        
+        exit $EXIT_CODE

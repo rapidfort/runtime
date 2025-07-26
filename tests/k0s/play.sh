@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Script configuration
-K0S_VERSION=${K0S_VERSION:-"v1.33.3+k0s.0"}  # Specific stable version
+K0S_VERSION=${K0S_VERSION:-"v1.33.3+k0s.0"}  # Latest stable version
 INSTALL_TYPE=${INSTALL_TYPE:-"single"}
 KUBECONFIG_PATH="$HOME/.kube/config"
 K0S_BINARY="/usr/local/bin/k0s"
@@ -1040,6 +1040,21 @@ EOF
     echo "  # Check status: $0 status"
     echo "  # Debug issues: $0 debug"
     echo "  # Watch pods: watch kubectl get pods -A"
+    
+    echo ""
+    log_warning "IMPORTANT: Set KUBECONFIG for kubectl to work:"
+    echo "  export KUBECONFIG=$KUBECONFIG_PATH"
+    echo ""
+    echo "  Or add to your shell profile:"
+    echo "  echo 'export KUBECONFIG=$KUBECONFIG_PATH' >> ~/.bashrc"
+    echo "  source ~/.bashrc"
+    
+    # Test kubectl connectivity
+    if KUBECONFIG="$KUBECONFIG_PATH" kubectl cluster-info &>/dev/null; then
+        log_success "kubectl is properly configured and can connect to the cluster"
+    else
+        log_warning "kubectl cannot connect. Make sure to export KUBECONFIG=$KUBECONFIG_PATH"
+    fi
 }
 
 # Function to uninstall everything
