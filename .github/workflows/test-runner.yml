@@ -1,0 +1,82 @@
+name: Test Self-Hosted Runners
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-all-runners:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [k0s, k3s, kind, kubeadm, microk8s, minikube, rke, openshift]
+    
+    runs-on: [self-hosted, ${{ matrix.runner }}]
+    
+    steps:
+    - name: Runner Information
+      run: |
+        echo "=== Testing runner: ${{ matrix.runner }} ==="
+        echo "Hostname: $(hostname)"
+        echo "IP Address: $(hostname -I | awk '{print $1}')"
+        echo "OS: $(lsb_release -d | cut -f2)"
+        echo "Kernel: $(uname -r)"
+        echo "CPU: $(nproc) cores"
+        echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
+        echo "Disk: $(df -h / | tail -1 | awk '{print $4}') available"
+        echo ""
+        
+    - name: Check Docker
+      run: |
+        echo "=== Docker Status ==="
+        docker --version
+        docker ps
+        echo ""
+        
+    - name: Check System Resources
+      run: |
+        echo "=== System Resources ==="
+        echo "CPU Usage:"
+        top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}'
+        echo ""
+        echo "Memory Usage:"
+        free -m
+        echo ""
+        echo "Disk Usage:"
+        df -h
+        echo ""
+        
+    - name: Network Test
+      run: |
+        echo "=== Network Connectivity ==="
+        ping -c 3 github.com
+        echo ""
+        curl -s https://api.github.com/rate_limit | jq .rate
+        echo ""
+        
+    - name: Create test file
+      run: |
+        echo "Runner ${{ matrix.runner }} is working correctly!" > /tmp/runner-test-${{ matrix.runner }}.txt
+        cat /tmp/runner-test-${{ matrix.runner }}.txt
+        
+  summary:
+    needs: test-all-runners
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Summary
+      run: |
+        echo "## Runner Test Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "All runners have been tested. Check individual job logs for details." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Runner | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+        
+        # Get job statuses from API
+        WORKFLOW_RUN_ID=${{ github.run_id }}
+        
+        for runner in k0s k3s kind kubeadm microk8s minikube rke openshift; do
+          echo "| $runner | Tested |" >> $GITHUB_STEP_SUMMARY
+        done
+
