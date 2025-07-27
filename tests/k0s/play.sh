@@ -328,7 +328,6 @@ metadata:
   name: k0s
 spec:
   api:
-    address: 0.0.0.0
     sans:
     - 127.0.0.1
     - localhost
