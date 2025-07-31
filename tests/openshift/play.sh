@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# k3s Installation and Management Script
+# OpenShift (CRI-O) Installation and Management Script
+# Simulates OpenShift environment with CRI-O runtime
 # Usage: ./play.sh [install|uninstall|status|help]
 
 # Source common architecture detection
@@ -21,7 +22,9 @@ NC='\033[0m' # No Color
 
 # Script configuration
 KUBECONFIG_PATH="$HOME/.kube/config"
-K3S_KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+K8S_VERSION="1.29.0"
+CRIO_VERSION="1.29"
+POD_NETWORK_CIDR="10.244.0.0/16"
 
 # Logging functions
 log_info() {
@@ -40,27 +43,19 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Function to detect host IP if RF_LOCAL_REGISTRY not set
+# Function to detect host IP
 detect_host_ip() {
     local host_ip=""
     
-    # First try RF_LOCAL_REGISTRY
     if [[ -n "$RF_LOCAL_REGISTRY" ]]; then
         echo "$RF_LOCAL_REGISTRY"
         return
     fi
     
-    # Try to get IP from default route
     host_ip=$(ip route get 1.1.1.1 | awk '{print $7; exit}' 2>/dev/null || true)
     
     if [[ -z "$host_ip" ]]; then
-        # Fallback to hostname -I
         host_ip=$(hostname -I | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)
-    fi
-    
-    if [[ -z "$host_ip" ]]; then
-        # Last resort - try to get from network interfaces
-        host_ip=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d'/' -f1 | head -1)
     fi
     
     echo "$host_ip"
@@ -69,16 +64,16 @@ detect_host_ip() {
 # Function to show help
 show_help() {
     cat << EOF
-k3s Installation and Management Script
+OpenShift (CRI-O) Installation and Management Script
 
 USAGE:
     $0 [COMMAND] [OPTIONS]
 
 COMMANDS:
-    install         Install k3s cluster with registry, ingress, and RapidFort Runtime
+    install         Install Kubernetes with CRI-O runtime (OpenShift-like)
     uninstall       Remove everything completely
-    status          Show k3s and registry status
-    deploy-rapidfort Deploy RapidFort Runtime to existing k3s cluster
+    status          Show cluster and CRI-O status
+    deploy-rapidfort Deploy RapidFort Runtime to existing cluster
     help            Show this help message
 
 OPTIONS:
@@ -96,21 +91,17 @@ EXAMPLES:
     $0 uninstall
 
 WHAT IT DOES:
-    - Installs k3s cluster
-    - Deploys container registry on IP:5000 (HTTP)
-    - Uses built-in Traefik ingress controller
-    - Configures containerd for registry access
+    - Installs Kubernetes with CRI-O runtime
+    - Deploys container registry on IP:5000
+    - Installs OpenShift Router (HAProxy based)
+    - Configures CRI-O for registry access
+    - Sets up OpenShift-like security contexts
     - Automatically deploys RapidFort Runtime if credentials found
 
 PREREQUISITES:
     - RF_LOCAL_REGISTRY environment variable (or --registry-ip)
-    - Docker should be configured with insecure-registries for IP:5000
-
-RAPIDFORT RUNTIME:
-    - Automatically deployed if both exist:
-      1. ~/.rapidfort/credentials
-      2. Helm installed
-    - Can be deployed later with: $0 deploy-rapidfort
+    - Root access required
+    - For RapidFort: ~/.rapidfort/credentials file
 
 EOF
 }
@@ -124,59 +115,192 @@ check_requirements() {
         exit 1
     fi
 
-    local required_commands=("curl" "systemctl")
-    for cmd in "${required_commands[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
-            log_error "Required command '$cmd' not found"
-            exit 1
-        fi
-    done
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This script must be run as root or with sudo"
+        exit 1
+    fi
+
+    # Detect OS
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+    else
+        log_error "Cannot detect OS"
+        exit 1
+    fi
 
     log_success "System requirements check passed"
 }
 
-# Function to check for existing kubeconfig
-check_existing_kubeconfig() {
-    if [[ -f "$KUBECONFIG_PATH" ]]; then
-        log_warning "Existing kubeconfig found at: $KUBECONFIG_PATH"
-        log_warning "Backing it up to: $KUBECONFIG_PATH.backup"
-        mv "$KUBECONFIG_PATH" "$KUBECONFIG_PATH.backup"
-    fi
+# Function to install CRI-O
+install_crio() {
+    log_info "Installing CRI-O ${CRIO_VERSION}..."
+
+    # Detect OS and install accordingly
+    case "$OS" in
+        ubuntu|debian)
+            # Add repositories
+            echo "deb [signed-by=/usr/share/keyrings/libcontainers-archive-keyring.gpg] https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/ /" > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
+            echo "deb [signed-by=/usr/share/keyrings/libcontainers-crio-archive-keyring.gpg] https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$CRIO_VERSION/$OS/ /" > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:$CRIO_VERSION.list
+
+            # Add keys
+            mkdir -p /usr/share/keyrings
+            curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/Release.key | gpg --dearmor -o /usr/share/keyrings/libcontainers-archive-keyring.gpg
+            curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$CRIO_VERSION/$OS/Release.key | gpg --dearmor -o /usr/share/keyrings/libcontainers-crio-archive-keyring.gpg
+
+            apt-get update
+            apt-get install -y cri-o cri-o-runc cri-tools
+            ;;
+        rhel|centos|fedora)
+            # Add repositories
+            curl -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable.repo https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/CentOS_8/devel:kubic:libcontainers:stable.repo
+            curl -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable:cri-o:$CRIO_VERSION.repo https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:$CRIO_VERSION/CentOS_8/devel:kubic:libcontainers:stable:cri-o:$CRIO_VERSION.repo
+
+            yum install -y cri-o cri-tools
+            ;;
+        *)
+            log_error "Unsupported OS: $OS"
+            exit 1
+            ;;
+    esac
+
+    # Configure CRI-O
+    mkdir -p /etc/crio/crio.conf.d
+
+    # Create crictl configuration
+    cat > /etc/crictl.yaml << EOF
+runtime-endpoint: unix:///var/run/crio/crio.sock
+image-endpoint: unix:///var/run/crio/crio.sock
+timeout: 10
+debug: false
+EOF
+
+    systemctl enable crio
+    systemctl start crio
+
+    log_success "CRI-O installed and configured"
 }
 
-# Function to check if k3s is installed
-is_k3s_installed() {
-    command -v k3s &> /dev/null
+# Function to configure CRI-O for registry
+configure_crio_registry() {
+    local registry_ip="$1"
+    
+    log_info "Configuring CRI-O for registry..."
+
+    # Configure CRI-O for insecure registry
+    cat > /etc/crio/crio.conf.d/10-insecure-registry.conf << EOF
+[crio.image]
+insecure_registries = ["$registry_ip:5000"]
+EOF
+
+    # Create registry configuration
+    mkdir -p /etc/containers/registries.conf.d
+    cat > /etc/containers/registries.conf.d/myregistry.conf << EOF
+[[registry]]
+location = "$registry_ip:5000"
+insecure = true
+EOF
+
+    # Restart CRI-O
+    systemctl restart crio
+    
+    log_success "CRI-O configured for registry"
 }
 
-# Function to check if k3s is running
-is_k3s_running() {
-    systemctl is-active --quiet k3s 2>/dev/null
+# Function to check if CRI-O is running
+is_crio_running() {
+    systemctl is-active --quiet crio 2>/dev/null
 }
 
-# Function to get k3s version
-get_k3s_version() {
-    if is_k3s_installed; then
-        k3s --version 2>/dev/null | head -n1 || echo "unknown"
-    else
-        echo "not installed"
-    fi
+# Function to install Kubernetes
+install_kubernetes() {
+    log_info "Installing Kubernetes ${K8S_VERSION}..."
+
+    # Install dependencies
+    apt-get update && apt-get install -y apt-transport-https ca-certificates curl
+
+    # Add Kubernetes repository
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION%.*}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION%.*}/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
+
+    # Install specific versions
+    apt-get update
+    apt-get install -y kubelet=${K8S_VERSION}-* kubeadm=${K8S_VERSION}-* kubectl=${K8S_VERSION}-*
+    apt-mark hold kubelet kubeadm kubectl
+
+    # Configure kubelet for CRI-O
+    mkdir -p /etc/systemd/system/kubelet.service.d
+    cat > /etc/systemd/system/kubelet.service.d/0-crio.conf << EOF
+[Service]
+Environment="KUBELET_EXTRA_ARGS=--container-runtime-endpoint=unix:///var/run/crio/crio.sock --cgroup-driver=systemd"
+EOF
+
+    systemctl daemon-reload
+    systemctl restart kubelet
+
+    log_success "Kubernetes installed"
+}
+
+# Function to setup OpenShift-like security
+setup_openshift_security() {
+    log_info "Setting up OpenShift-like security contexts..."
+
+    # Create OpenShift-like SCCs (Security Context Constraints)
+    kubectl create namespace openshift-infra || true
+
+    # Create restricted SCC equivalent
+    cat << EOF | kubectl apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-infra
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openshift:scc:restricted
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openshift:scc:restricted
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openshift:scc:restricted
+subjects:
+- kind: Group
+  name: system:authenticated
+  apiGroup: rbac.authorization.k8s.io
+EOF
+
+    log_success "OpenShift-like security configured"
 }
 
 # Function to show status
 show_status() {
-    log_info "k3s Status Report"
-    echo "=================="
+    log_info "OpenShift (CRI-O) Status Report"
+    echo "================================"
 
-    if is_k3s_installed; then
-        log_success "k3s installed: $(get_k3s_version)"
+    if is_crio_running; then
+        log_success "CRI-O is running"
+        crictl version
+        crictl info | grep -E "(version|config)" || true
     else
-        log_warning "k3s not installed"
-        return
+        log_error "CRI-O is not running"
     fi
 
-    if is_k3s_running; then
-        log_success "k3s is running"
+    if systemctl is-active --quiet kubelet; then
+        log_success "Kubernetes is running"
 
         if [[ -f "$KUBECONFIG_PATH" ]] && command -v kubectl &> /dev/null; then
             echo ""
@@ -190,8 +314,6 @@ show_status() {
                 local registry_status=$(kubectl get deployment registry -n registry -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
                 if [[ "$registry_status" == "1" ]]; then
                     log_success "Registry: Running"
-                    local registry_ip=$(kubectl get svc registry -n registry -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
-                    echo "  Registry IP: $registry_ip:5000"
                     local external_ip=$(kubectl get svc registry -n registry -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
                     echo "  External IP: $external_ip:5000"
                 else
@@ -199,18 +321,6 @@ show_status() {
                 fi
             fi
 
-            # Check ingress (Traefik)
-            if kubectl get namespace kube-system &>/dev/null; then
-                echo ""
-                log_info "Traefik ingress controller:"
-                local traefik_status=$(kubectl get deployment traefik -n kube-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
-                if [[ -n "$traefik_status" ]] && [[ "$traefik_status" -gt 0 ]]; then
-                    log_success "Traefik: Running"
-                else
-                    log_warning "Traefik: Not ready"
-                fi
-            fi
-            
             # Check RapidFort Runtime
             if kubectl get namespace rapidfort &>/dev/null; then
                 echo ""
@@ -225,17 +335,17 @@ show_status() {
             fi
         fi
     else
-        log_warning "k3s not running"
+        log_warning "Kubernetes not running"
     fi
 }
 
 # Function to deploy RapidFort Runtime
 deploy_rapidfort() {
-    log_info "Deploying RapidFort Runtime to k3s cluster"
+    log_info "Deploying RapidFort Runtime to OpenShift (CRI-O) cluster"
     
-    # Check if k3s is running
-    if ! systemctl is-active --quiet k3s || ! kubectl cluster-info &>/dev/null; then
-        log_error "k3s is not running. Install k3s first with: $0 install"
+    # Check if cluster is running
+    if ! kubectl cluster-info &>/dev/null; then
+        log_error "Kubernetes cluster is not running. Install cluster first with: $0 install"
         exit 1
     fi
     
@@ -312,11 +422,6 @@ deploy_rapidfort() {
     local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
     if [[ -f "$registry_secret_path" ]]; then
         kubectl apply -f "$registry_secret_path" -n rapidfort
-    else
-        log_warning "Registry secret not found at: $registry_secret_path"
-        if [[ "$use_local_registry" == "false" ]]; then
-            log_warning "Registry secret may be required for pulling from quay.io"
-        fi
     fi
     
     # Deploy RapidFort Runtime
@@ -326,10 +431,10 @@ deploy_rapidfort() {
         "upgrade" "--install" "rfruntime"
         "$runtime_chart"
         "--namespace" "rapidfort"
-        "--set" "ClusterName=k3s"
-        "--set" "ClusterCaption=k3s Cluster"
+        "--set" "ClusterName=openshift"
+        "--set" "ClusterCaption=OpenShift Cluster"
         "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
-        "--set" "variant=k3s"
+        "--set" "variant=generic"
         "--set" "scan.enabled=true"
         "--set" "profile.enabled=true"
         "--wait" "--timeout=5m"
@@ -337,40 +442,12 @@ deploy_rapidfort() {
     
     # Check if we should use local registry
     if [[ "$use_local_registry" == "true" ]] || [[ "$RF_USE_LOCAL_REGISTRY" == "true" ]]; then
-        use_local_registry=true
-        log_info "Using local registry for RapidFort Runtime images"
-        
-        # Override the registry value in values.yaml
-        helm_args+=(
-            "--set" "registry=$registry_ip:5000/rapidfort"
-        )
-        
-        # If image tag is specified, use it
+        helm_args+=("--set" "registry=$registry_ip:5000/rapidfort")
         if [[ -n "$image_tag" ]]; then
             helm_args+=("--set" "imageTag=$image_tag")
         fi
-        
-        # Set pull policy to Always for local registry
         helm_args+=("--set" "imagePullPolicy=Always")
-        
-        log_info "Note: Make sure all RapidFort images are available in local registry:"
-        echo "  Images needed (example with tag 3.1.32-dev6):"
-        echo "    - $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
-        echo "    - $registry_ip:5000/rapidfort/controller:3.1.32-dev6"
-        echo "    - $registry_ip:5000/rapidfort/rfwrap-init:3.1.32-dev6"
-        echo "    - $registry_ip:5000/rapidfort/bpf:3.1.32-dev6"
-        echo ""
-        echo "  To push images (example):"
-        echo "    docker pull quay.io/rapidfort/sentry:3.1.32-dev6"
-        echo "    docker tag quay.io/rapidfort/sentry:3.1.32-dev6 $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
-        echo "    docker push $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
-        echo ""
-        echo "  Helm will use registry: $registry_ip:5000/rapidfort"
-        if [[ -n "$image_tag" ]]; then
-            echo "  Image tag: $image_tag"
-        fi
     else
-        # Add imagePullSecrets for quay.io
         if [[ -f "$registry_secret_path" ]]; then
             helm_args+=("--set" "imagePullSecrets.names={rapidfort-registry-secret}")
         fi
@@ -389,19 +466,64 @@ deploy_rapidfort() {
     log_info "Waiting for RapidFort Runtime pods to be ready..."
     if kubectl wait --for=condition=ready pod -l app=rfruntime -n rapidfort --timeout=300s; then
         log_success "RapidFort Runtime deployed successfully"
-        echo ""
         kubectl get pods -n rapidfort -o wide
-        echo ""
-        echo "Commands:"
-        echo "  # Check logs: kubectl logs -n rapidfort -l app=rfruntime -c sentry -f"
-        echo "  # Check scan results: rfjobs"
-        echo "  # Check runtime status: kubectl get pods -n rapidfort"
-        echo "  # Check images being used: kubectl describe pods -n rapidfort | grep Image:"
     else
         log_error "RapidFort Runtime deployment failed"
         kubectl describe pods -n rapidfort
         exit 1
     fi
+}
+
+# Function to initialize cluster
+initialize_cluster() {
+    log_info "Initializing Kubernetes cluster..."
+
+    # Disable swap
+    swapoff -a
+    sed -i '/ swap / s/^/#/' /etc/fstab
+
+    # Load required modules
+    modprobe overlay
+    modprobe br_netfilter
+
+    # Set sysctl params
+    cat > /etc/sysctl.d/k8s.conf << EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+    sysctl --system
+
+    # Initialize with CRI-O
+    cat > /tmp/kubeadm-config.yaml << EOF
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+nodeRegistration:
+  criSocket: unix:///var/run/crio/crio.sock
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: v${K8S_VERSION}
+networking:
+  podSubnet: $POD_NETWORK_CIDR
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+containerRuntimeEndpoint: unix:///var/run/crio/crio.sock
+EOF
+
+    kubeadm init --config=/tmp/kubeadm-config.yaml
+
+    # Setup kubeconfig
+    mkdir -p $HOME/.kube
+    cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
+    chown $(id -u):$(id -g) $HOME/.kube/config
+
+    # Remove taints on control plane
+    kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true
+
+    log_success "Cluster initialized"
 }
 
 # Function to install everything
@@ -417,49 +539,45 @@ install_all() {
         fi
     fi
 
-    log_info "Installing k3s cluster with registry at $registry_ip:5000"
+    log_info "Installing OpenShift-like cluster with CRI-O and registry at $registry_ip:5000"
 
     check_requirements
-    check_existing_kubeconfig
 
-    if is_k3s_installed && is_k3s_running; then
-        log_warning "k3s already running"
-        show_status
-        return 0
+    # Check for existing kubeconfig
+    if [[ -f "$KUBECONFIG_PATH" ]]; then
+        log_warning "Existing kubeconfig found, backing up..."
+        mv "$KUBECONFIG_PATH" "$KUBECONFIG_PATH.backup"
     fi
 
-    # Install k3s
-    log_info "Installing k3s..."
-    curl -sfL https://get.k3s.io | sh -
+    # Install CRI-O
+    install_crio
 
-    # Wait for k3s to be ready
-    log_info "Waiting for k3s to be ready..."
-    local retries=30
-    while [[ $retries -gt 0 ]]; do
-        if is_k3s_running && test -f "$K3S_KUBECONFIG"; then
-            break
-        fi
-        sleep 5
-        ((retries--))
-    done
+    # Configure CRI-O for registry
+    configure_crio_registry "$registry_ip"
 
-    if [[ $retries -eq 0 ]]; then
-        log_error "k3s failed to start properly"
-        exit 1
-    fi
+    # Install Kubernetes
+    install_kubernetes
 
-    # Setup kubeconfig
-    log_info "Setting up kubeconfig..."
-    mkdir -p ~/.kube
-    cp "$K3S_KUBECONFIG" "$KUBECONFIG_PATH"
-    chmod 600 "$KUBECONFIG_PATH"
+    # Initialize cluster
+    initialize_cluster
+
+    # Install CNI plugin (Weave Net)
+    log_info "Installing Weave Net CNI..."
+    kubectl apply -f https://github.com/weaveworks/weave/releases/download/v2.8.1/weave-daemonset-k8s.yaml
+
+    # Wait for CNI to be ready
+    log_info "Waiting for CNI to be ready..."
+    kubectl wait --for=condition=ready pod -n kube-system -l name=weave-net --timeout=300s
+
+    # Setup OpenShift-like security
+    setup_openshift_security
 
     # Install registry
-    log_info "Installing registry with HTTP..."
+    log_info "Installing registry..."
 
     kubectl create namespace registry
 
-    # Deploy registry (HTTP version - simpler)
+    # Deploy registry
     cat << EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -521,35 +639,9 @@ EOF
     # Wait for registry
     kubectl wait --for=condition=available --timeout=300s deployment/registry -n registry
 
-    # Configure containerd for k3s
-    log_info "Configuring containerd for registry..."
-
-    # Create k3s registries.yaml for HTTP registry
-    mkdir -p /etc/rancher/k3s
-    cat > /etc/rancher/k3s/registries.yaml << EOF
-mirrors:
-  "$registry_ip:5000":
-    endpoint:
-      - "http://$registry_ip:5000"
-configs:
-  "$registry_ip:5000":
-    tls:
-      insecure_skip_verify: true
-EOF
-
-    # Restart k3s to pick up registry config
-    log_info "Restarting k3s to pick up registry configuration..."
-    systemctl restart k3s
-
-    # Wait for k3s to be ready again
-    local retries=30
-    while [[ $retries -gt 0 ]]; do
-        if is_k3s_running; then
-            break
-        fi
-        sleep 3
-        ((retries--))
-    done
+    # Install OpenShift Router (simplified HAProxy ingress)
+    log_info "Installing OpenShift-like router..."
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/baremetal/deploy.yaml
 
     # Test registry
     log_info "Testing registry connectivity..."
@@ -561,34 +653,31 @@ EOF
         log_warning "Registry may not be fully ready yet"
     fi
 
-    # Test with a real image
-    log_info "Testing image push/pull..."
-    if command -v docker &> /dev/null; then
-        docker pull hello-world:latest
-        docker tag hello-world:latest $registry_ip:5000/hello-world:test
-        docker push $registry_ip:5000/hello-world:test
-
-        # Test Kubernetes can pull the image
-        kubectl run test-registry --image=$registry_ip:5000/hello-world:test --command -- sleep 30
-        kubectl wait --for=condition=ready pod/test-registry --timeout=60s && log_success "Kubernetes can pull from registry" || log_warning "Kubernetes pull test failed"
-        kubectl delete pod test-registry --force
-    fi
+    # Test CRI-O with registry
+    log_info "Testing CRI-O image pull..."
+    crictl pull docker.io/library/hello-world:latest || true
 
     log_success "Installation completed!"
 
     echo ""
-    log_info "Registry Details:"
+    log_info "OpenShift-like Cluster Details:"
+    echo "  • Container Runtime: CRI-O"
     echo "  • Registry URL: http://$registry_ip:5000"
+    echo "  • Security: OpenShift-like SCCs enabled"
     echo ""
     log_info "Usage:"
-    echo "  # Push with docker (assuming docker is configured for insecure registry):"
+    echo "  # Push with docker/podman:"
     echo "  docker tag myimage:latest $registry_ip:5000/myimage:latest"
     echo "  docker push $registry_ip:5000/myimage:latest"
     echo ""
     echo "  # Use in Kubernetes:"
     echo "  image: $registry_ip:5000/myimage:latest"
+    echo ""
+    echo "  # CRI-O commands:"
+    echo "  crictl images  # List images"
+    echo "  crictl ps      # List containers"
     
-    # Deploy RapidFort Runtime if credentials exist and helm is available
+    # Deploy RapidFort Runtime if credentials exist
     if [[ -f "$HOME/.rapidfort/credentials" ]] && command -v helm &> /dev/null; then
         log_info "Found RapidFort credentials and helm, deploying RapidFort Runtime..."
         deploy_rapidfort
@@ -604,12 +693,6 @@ EOF
         echo "  2. Install helm if not already installed"
         echo "  3. Run: $0 deploy-rapidfort"
     fi
-    
-    echo ""
-    log_info "k3s Commands:"
-    echo "  # Check cluster: kubectl get nodes"
-    echo "  # Check pods: kubectl get pods --all-namespaces"
-    echo "  # Traefik dashboard: kubectl port-forward -n kube-system svc/traefik 9000:9000"
 }
 
 # Function to uninstall everything
@@ -617,23 +700,28 @@ uninstall_all() {
     log_info "Uninstalling everything..."
 
     # Uninstall RapidFort Runtime if present
-    if command -v helm &> /dev/null && helm list -n rapidfort 2>/dev/null | grep -q rfruntime; then
-        log_info "Uninstalling RapidFort Runtime..."
-        helm uninstall rfruntime -n rapidfort 2>/dev/null || true
-        kubectl delete namespace rapidfort --force --grace-period=0 2>/dev/null || true
+    if command -v helm &> /dev/null && kubectl get namespace rapidfort &>/dev/null 2>&1; then
+        if helm list -n rapidfort 2>/dev/null | grep -q rfruntime; then
+            log_info "Uninstalling RapidFort Runtime..."
+            helm uninstall rfruntime -n rapidfort 2>/dev/null || true
+            kubectl delete namespace rapidfort --force --grace-period=0 2>/dev/null || true
+        fi
     fi
 
-    if is_k3s_installed; then
-        log_info "Stopping k3s..."
-        systemctl stop k3s 2>/dev/null || true
-
-        log_info "Removing k3s..."
-        /usr/local/bin/k3s-uninstall.sh 2>/dev/null || true
-
-        log_info "Cleaning up k3s configuration..."
-        rm -rf /etc/rancher/k3s/
-        rm -rf /var/lib/rancher/k3s/
+    # Reset kubernetes
+    if command -v kubeadm &> /dev/null; then
+        kubeadm reset -f
     fi
+
+    # Remove packages
+    apt-get remove -y --purge kubeadm kubectl kubelet kubernetes-cni cri-o cri-o-runc
+    apt-get autoremove -y
+
+    # Clean up
+    rm -rf /etc/kubernetes /var/lib/kubelet /var/lib/etcd /opt/cni /etc/cni
+    rm -rf /etc/crio /var/lib/containers /run/containers
+    rm -f /etc/apt/sources.list.d/kubernetes.list
+    rm -f /etc/apt/sources.list.d/devel*
 
     # Remove kubeconfig
     if [[ -f "$KUBECONFIG_PATH" ]]; then

@@ -16,7 +16,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration - Added zuul to supported clusters
-SUPPORTED_CLUSTERS=("kubeadm" "k0s" "k3s" "kind" "microk8s" "minikube" "zuul")
+SUPPORTED_CLUSTERS=("kubeadm" "k0s" "k3s" "kind" "microk8s" "minikube" "zuul" "rke2" "openshift" "uds" "k3d")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 KUBECONFIG_PATH="$HOME/.kube/config"
 LOG_DIR="$SCRIPT_DIR/logs"
@@ -1061,7 +1061,7 @@ deploy_rapidfort_runtime() {
         "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
         "--set" "variant=$variant"
         "--set" "scan.enabled=true"
-        "--set" "profile.enabled=false"
+        "--set" "profile.enabled=true"
         "--wait" "--timeout=5m"
     )
     

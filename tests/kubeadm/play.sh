@@ -536,7 +536,7 @@ deploy_rapidfort() {
         "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
         "--set" "variant=generic"
         "--set" "scan.enabled=true"
-        "--set" "profile.enabled=false"
+        "--set" "profile.enabled=true"
         "--wait" "--timeout=5m"
     )
     

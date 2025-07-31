@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# k3s Installation and Management Script
+# RKE2 Installation and Management Script
 # Usage: ./play.sh [install|uninstall|status|help]
 
 # Source common architecture detection
@@ -21,7 +21,8 @@ NC='\033[0m' # No Color
 
 # Script configuration
 KUBECONFIG_PATH="$HOME/.kube/config"
-K3S_KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+RKE2_CONFIG="/etc/rancher/rke2/config.yaml"
+RKE2_VERSION="${RKE2_VERSION:-latest}"
 
 # Logging functions
 log_info() {
@@ -40,27 +41,19 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Function to detect host IP if RF_LOCAL_REGISTRY not set
+# Function to detect host IP
 detect_host_ip() {
     local host_ip=""
     
-    # First try RF_LOCAL_REGISTRY
     if [[ -n "$RF_LOCAL_REGISTRY" ]]; then
         echo "$RF_LOCAL_REGISTRY"
         return
     fi
     
-    # Try to get IP from default route
     host_ip=$(ip route get 1.1.1.1 | awk '{print $7; exit}' 2>/dev/null || true)
     
     if [[ -z "$host_ip" ]]; then
-        # Fallback to hostname -I
         host_ip=$(hostname -I | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)
-    fi
-    
-    if [[ -z "$host_ip" ]]; then
-        # Last resort - try to get from network interfaces
-        host_ip=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d'/' -f1 | head -1)
     fi
     
     echo "$host_ip"
@@ -69,20 +62,21 @@ detect_host_ip() {
 # Function to show help
 show_help() {
     cat << EOF
-k3s Installation and Management Script
+RKE2 Installation and Management Script
 
 USAGE:
     $0 [COMMAND] [OPTIONS]
 
 COMMANDS:
-    install         Install k3s cluster with registry, ingress, and RapidFort Runtime
+    install         Install RKE2 cluster with registry and RapidFort Runtime
     uninstall       Remove everything completely
-    status          Show k3s and registry status
-    deploy-rapidfort Deploy RapidFort Runtime to existing k3s cluster
+    status          Show RKE2 status
+    deploy-rapidfort Deploy RapidFort Runtime to existing RKE2 cluster
     help            Show this help message
 
 OPTIONS:
     --registry-ip   IP address for registry (optional, defaults to RF_LOCAL_REGISTRY)
+    --version       RKE2 version to install (default: latest)
     --local-registry Use local registry for RapidFort images
     --image-tag     Tag for RapidFort images (e.g., 3.1.32-dev6)
     -h, --help      Show this help
@@ -96,21 +90,15 @@ EXAMPLES:
     $0 uninstall
 
 WHAT IT DOES:
-    - Installs k3s cluster
-    - Deploys container registry on IP:5000 (HTTP)
-    - Uses built-in Traefik ingress controller
+    - Installs RKE2 (Rancher Kubernetes Engine 2)
+    - Deploys container registry on IP:5000
+    - Uses built-in Nginx ingress controller
     - Configures containerd for registry access
     - Automatically deploys RapidFort Runtime if credentials found
 
 PREREQUISITES:
     - RF_LOCAL_REGISTRY environment variable (or --registry-ip)
-    - Docker should be configured with insecure-registries for IP:5000
-
-RAPIDFORT RUNTIME:
-    - Automatically deployed if both exist:
-      1. ~/.rapidfort/credentials
-      2. Helm installed
-    - Can be deployed later with: $0 deploy-rapidfort
+    - For RapidFort: ~/.rapidfort/credentials file
 
 EOF
 }
@@ -124,40 +112,40 @@ check_requirements() {
         exit 1
     fi
 
-    local required_commands=("curl" "systemctl")
-    for cmd in "${required_commands[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
-            log_error "Required command '$cmd' not found"
-            exit 1
-        fi
-    done
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This script must be run as root or with sudo"
+        exit 1
+    fi
+
+    # Check system resources
+    local mem_available=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
+    if [[ $mem_available -lt 4194304 ]]; then  # 4GB in KB
+        log_warning "Less than 4GB of available memory. RKE2 may have issues."
+    fi
+
+    local cpu_count=$(nproc)
+    if [[ $cpu_count -lt 2 ]]; then
+        log_warning "Less than 2 CPUs detected. RKE2 may run slowly."
+    fi
 
     log_success "System requirements check passed"
 }
 
-# Function to check for existing kubeconfig
-check_existing_kubeconfig() {
-    if [[ -f "$KUBECONFIG_PATH" ]]; then
-        log_warning "Existing kubeconfig found at: $KUBECONFIG_PATH"
-        log_warning "Backing it up to: $KUBECONFIG_PATH.backup"
-        mv "$KUBECONFIG_PATH" "$KUBECONFIG_PATH.backup"
-    fi
+# Function to check if RKE2 is installed
+is_rke2_installed() {
+    command -v rke2 &> /dev/null || [[ -f /usr/local/bin/rke2 ]]
 }
 
-# Function to check if k3s is installed
-is_k3s_installed() {
-    command -v k3s &> /dev/null
+# Function to check if RKE2 is running
+is_rke2_running() {
+    systemctl is-active --quiet rke2-server 2>/dev/null
 }
 
-# Function to check if k3s is running
-is_k3s_running() {
-    systemctl is-active --quiet k3s 2>/dev/null
-}
-
-# Function to get k3s version
-get_k3s_version() {
-    if is_k3s_installed; then
-        k3s --version 2>/dev/null | head -n1 || echo "unknown"
+# Function to get RKE2 version
+get_rke2_version() {
+    if is_rke2_installed; then
+        rke2 --version 2>/dev/null | head -n1 || echo "unknown"
     else
         echo "not installed"
     fi
@@ -165,18 +153,18 @@ get_k3s_version() {
 
 # Function to show status
 show_status() {
-    log_info "k3s Status Report"
+    log_info "RKE2 Status Report"
     echo "=================="
 
-    if is_k3s_installed; then
-        log_success "k3s installed: $(get_k3s_version)"
+    if is_rke2_installed; then
+        log_success "RKE2 installed: $(get_rke2_version)"
     else
-        log_warning "k3s not installed"
+        log_warning "RKE2 not installed"
         return
     fi
 
-    if is_k3s_running; then
-        log_success "k3s is running"
+    if is_rke2_running; then
+        log_success "RKE2 is running"
 
         if [[ -f "$KUBECONFIG_PATH" ]] && command -v kubectl &> /dev/null; then
             echo ""
@@ -190,8 +178,6 @@ show_status() {
                 local registry_status=$(kubectl get deployment registry -n registry -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
                 if [[ "$registry_status" == "1" ]]; then
                     log_success "Registry: Running"
-                    local registry_ip=$(kubectl get svc registry -n registry -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
-                    echo "  Registry IP: $registry_ip:5000"
                     local external_ip=$(kubectl get svc registry -n registry -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
                     echo "  External IP: $external_ip:5000"
                 else
@@ -199,18 +185,6 @@ show_status() {
                 fi
             fi
 
-            # Check ingress (Traefik)
-            if kubectl get namespace kube-system &>/dev/null; then
-                echo ""
-                log_info "Traefik ingress controller:"
-                local traefik_status=$(kubectl get deployment traefik -n kube-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
-                if [[ -n "$traefik_status" ]] && [[ "$traefik_status" -gt 0 ]]; then
-                    log_success "Traefik: Running"
-                else
-                    log_warning "Traefik: Not ready"
-                fi
-            fi
-            
             # Check RapidFort Runtime
             if kubectl get namespace rapidfort &>/dev/null; then
                 echo ""
@@ -225,17 +199,17 @@ show_status() {
             fi
         fi
     else
-        log_warning "k3s not running"
+        log_warning "RKE2 not running"
     fi
 }
 
 # Function to deploy RapidFort Runtime
 deploy_rapidfort() {
-    log_info "Deploying RapidFort Runtime to k3s cluster"
+    log_info "Deploying RapidFort Runtime to RKE2 cluster"
     
-    # Check if k3s is running
-    if ! systemctl is-active --quiet k3s || ! kubectl cluster-info &>/dev/null; then
-        log_error "k3s is not running. Install k3s first with: $0 install"
+    # Check if RKE2 is running
+    if ! systemctl is-active --quiet rke2-server || ! kubectl cluster-info &>/dev/null; then
+        log_error "RKE2 is not running. Install RKE2 first with: $0 install"
         exit 1
     fi
     
@@ -312,11 +286,6 @@ deploy_rapidfort() {
     local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
     if [[ -f "$registry_secret_path" ]]; then
         kubectl apply -f "$registry_secret_path" -n rapidfort
-    else
-        log_warning "Registry secret not found at: $registry_secret_path"
-        if [[ "$use_local_registry" == "false" ]]; then
-            log_warning "Registry secret may be required for pulling from quay.io"
-        fi
     fi
     
     # Deploy RapidFort Runtime
@@ -326,10 +295,10 @@ deploy_rapidfort() {
         "upgrade" "--install" "rfruntime"
         "$runtime_chart"
         "--namespace" "rapidfort"
-        "--set" "ClusterName=k3s"
-        "--set" "ClusterCaption=k3s Cluster"
+        "--set" "ClusterName=rke2"
+        "--set" "ClusterCaption=RKE2 Cluster"
         "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
-        "--set" "variant=k3s"
+        "--set" "variant=generic"
         "--set" "scan.enabled=true"
         "--set" "profile.enabled=true"
         "--wait" "--timeout=5m"
@@ -337,40 +306,12 @@ deploy_rapidfort() {
     
     # Check if we should use local registry
     if [[ "$use_local_registry" == "true" ]] || [[ "$RF_USE_LOCAL_REGISTRY" == "true" ]]; then
-        use_local_registry=true
-        log_info "Using local registry for RapidFort Runtime images"
-        
-        # Override the registry value in values.yaml
-        helm_args+=(
-            "--set" "registry=$registry_ip:5000/rapidfort"
-        )
-        
-        # If image tag is specified, use it
+        helm_args+=("--set" "registry=$registry_ip:5000/rapidfort")
         if [[ -n "$image_tag" ]]; then
             helm_args+=("--set" "imageTag=$image_tag")
         fi
-        
-        # Set pull policy to Always for local registry
         helm_args+=("--set" "imagePullPolicy=Always")
-        
-        log_info "Note: Make sure all RapidFort images are available in local registry:"
-        echo "  Images needed (example with tag 3.1.32-dev6):"
-        echo "    - $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
-        echo "    - $registry_ip:5000/rapidfort/controller:3.1.32-dev6"
-        echo "    - $registry_ip:5000/rapidfort/rfwrap-init:3.1.32-dev6"
-        echo "    - $registry_ip:5000/rapidfort/bpf:3.1.32-dev6"
-        echo ""
-        echo "  To push images (example):"
-        echo "    docker pull quay.io/rapidfort/sentry:3.1.32-dev6"
-        echo "    docker tag quay.io/rapidfort/sentry:3.1.32-dev6 $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
-        echo "    docker push $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
-        echo ""
-        echo "  Helm will use registry: $registry_ip:5000/rapidfort"
-        if [[ -n "$image_tag" ]]; then
-            echo "  Image tag: $image_tag"
-        fi
     else
-        # Add imagePullSecrets for quay.io
         if [[ -f "$registry_secret_path" ]]; then
             helm_args+=("--set" "imagePullSecrets.names={rapidfort-registry-secret}")
         fi
@@ -389,14 +330,7 @@ deploy_rapidfort() {
     log_info "Waiting for RapidFort Runtime pods to be ready..."
     if kubectl wait --for=condition=ready pod -l app=rfruntime -n rapidfort --timeout=300s; then
         log_success "RapidFort Runtime deployed successfully"
-        echo ""
         kubectl get pods -n rapidfort -o wide
-        echo ""
-        echo "Commands:"
-        echo "  # Check logs: kubectl logs -n rapidfort -l app=rfruntime -c sentry -f"
-        echo "  # Check scan results: rfjobs"
-        echo "  # Check runtime status: kubectl get pods -n rapidfort"
-        echo "  # Check images being used: kubectl describe pods -n rapidfort | grep Image:"
     else
         log_error "RapidFort Runtime deployment failed"
         kubectl describe pods -n rapidfort
@@ -407,6 +341,7 @@ deploy_rapidfort() {
 # Function to install everything
 install_all() {
     local registry_ip="$1"
+    local rke2_version="${2:-$RKE2_VERSION}"
 
     # If no registry IP provided, use RF_LOCAL_REGISTRY or auto-detect
     if [[ -z "$registry_ip" ]]; then
@@ -417,26 +352,80 @@ install_all() {
         fi
     fi
 
-    log_info "Installing k3s cluster with registry at $registry_ip:5000"
+    log_info "Installing RKE2 cluster with registry at $registry_ip:5000"
 
     check_requirements
-    check_existing_kubeconfig
 
-    if is_k3s_installed && is_k3s_running; then
-        log_warning "k3s already running"
+    # Check for existing kubeconfig
+    if [[ -f "$KUBECONFIG_PATH" ]]; then
+        log_warning "Existing kubeconfig found, backing up..."
+        mv "$KUBECONFIG_PATH" "$KUBECONFIG_PATH.backup"
+    fi
+
+    if is_rke2_installed && is_rke2_running; then
+        log_warning "RKE2 already running"
         show_status
         return 0
     fi
 
-    # Install k3s
-    log_info "Installing k3s..."
-    curl -sfL https://get.k3s.io | sh -
+    # Disable swap
+    swapoff -a
+    sed -i '/ swap / s/^/#/' /etc/fstab
 
-    # Wait for k3s to be ready
-    log_info "Waiting for k3s to be ready..."
-    local retries=30
+    # Load required modules
+    modprobe overlay
+    modprobe br_netfilter
+
+    # Set sysctl params
+    cat > /etc/sysctl.d/k8s.conf << EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+    sysctl --system
+
+    # Install RKE2
+    log_info "Installing RKE2..."
+    
+    # Download and run installation script
+    curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="$rke2_version" sh -
+
+    # Create RKE2 config directory
+    mkdir -p /etc/rancher/rke2
+
+    # Create RKE2 config
+    cat > "$RKE2_CONFIG" << EOF
+write-kubeconfig-mode: "0644"
+tls-san:
+  - $registry_ip
+node-label:
+  - "ingress-ready=true"
+disable:
+  - rke2-ingress-nginx
+private-registry: "/etc/rancher/rke2/registries.yaml"
+EOF
+
+    # Configure registry
+    cat > /etc/rancher/rke2/registries.yaml << EOF
+mirrors:
+  "$registry_ip:5000":
+    endpoint:
+      - "http://$registry_ip:5000"
+configs:
+  "$registry_ip:5000":
+    tls:
+      insecure_skip_verify: true
+EOF
+
+    # Enable and start RKE2
+    systemctl enable rke2-server.service
+    systemctl start rke2-server.service
+
+    # Wait for RKE2 to be ready
+    log_info "Waiting for RKE2 to be ready..."
+    local retries=60
     while [[ $retries -gt 0 ]]; do
-        if is_k3s_running && test -f "$K3S_KUBECONFIG"; then
+        if systemctl is-active --quiet rke2-server && [[ -f /etc/rancher/rke2/rke2.yaml ]]; then
             break
         fi
         sleep 5
@@ -444,23 +433,43 @@ install_all() {
     done
 
     if [[ $retries -eq 0 ]]; then
-        log_error "k3s failed to start properly"
+        log_error "RKE2 failed to start properly"
         exit 1
     fi
 
     # Setup kubeconfig
     log_info "Setting up kubeconfig..."
     mkdir -p ~/.kube
-    cp "$K3S_KUBECONFIG" "$KUBECONFIG_PATH"
+    cp -f /etc/rancher/rke2/rke2.yaml "$KUBECONFIG_PATH"
     chmod 600 "$KUBECONFIG_PATH"
+    export KUBECONFIG="$KUBECONFIG_PATH"
+
+    # Add kubectl and other tools to PATH
+    export PATH="/var/lib/rancher/rke2/bin:$PATH"
+    echo 'export PATH="/var/lib/rancher/rke2/bin:$PATH"' >> ~/.bashrc
+
+    # Wait for nodes to be ready
+    log_info "Waiting for nodes to be ready..."
+    /var/lib/rancher/rke2/bin/kubectl wait --for=condition=Ready nodes --all --timeout=300s
+
+    # Install NGINX ingress controller
+    log_info "Installing NGINX ingress controller..."
+    /var/lib/rancher/rke2/bin/kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/baremetal/deploy.yaml
+
+    # Wait for ingress controller
+    log_info "Waiting for ingress controller..."
+    /var/lib/rancher/rke2/bin/kubectl wait --namespace ingress-nginx \
+        --for=condition=ready pod \
+        --selector=app.kubernetes.io/component=controller \
+        --timeout=300s || log_warning "Ingress taking longer to start, continuing..."
 
     # Install registry
     log_info "Installing registry with HTTP..."
 
-    kubectl create namespace registry
+    /var/lib/rancher/rke2/bin/kubectl create namespace registry
 
-    # Deploy registry (HTTP version - simpler)
-    cat << EOF | kubectl apply -f -
+    # Deploy registry
+    cat << EOF | /var/lib/rancher/rke2/bin/kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -519,37 +528,7 @@ spec:
 EOF
 
     # Wait for registry
-    kubectl wait --for=condition=available --timeout=300s deployment/registry -n registry
-
-    # Configure containerd for k3s
-    log_info "Configuring containerd for registry..."
-
-    # Create k3s registries.yaml for HTTP registry
-    mkdir -p /etc/rancher/k3s
-    cat > /etc/rancher/k3s/registries.yaml << EOF
-mirrors:
-  "$registry_ip:5000":
-    endpoint:
-      - "http://$registry_ip:5000"
-configs:
-  "$registry_ip:5000":
-    tls:
-      insecure_skip_verify: true
-EOF
-
-    # Restart k3s to pick up registry config
-    log_info "Restarting k3s to pick up registry configuration..."
-    systemctl restart k3s
-
-    # Wait for k3s to be ready again
-    local retries=30
-    while [[ $retries -gt 0 ]]; do
-        if is_k3s_running; then
-            break
-        fi
-        sleep 3
-        ((retries--))
-    done
+    /var/lib/rancher/rke2/bin/kubectl wait --for=condition=available --timeout=300s deployment/registry -n registry
 
     # Test registry
     log_info "Testing registry connectivity..."
@@ -561,19 +540,6 @@ EOF
         log_warning "Registry may not be fully ready yet"
     fi
 
-    # Test with a real image
-    log_info "Testing image push/pull..."
-    if command -v docker &> /dev/null; then
-        docker pull hello-world:latest
-        docker tag hello-world:latest $registry_ip:5000/hello-world:test
-        docker push $registry_ip:5000/hello-world:test
-
-        # Test Kubernetes can pull the image
-        kubectl run test-registry --image=$registry_ip:5000/hello-world:test --command -- sleep 30
-        kubectl wait --for=condition=ready pod/test-registry --timeout=60s && log_success "Kubernetes can pull from registry" || log_warning "Kubernetes pull test failed"
-        kubectl delete pod test-registry --force
-    fi
-
     log_success "Installation completed!"
 
     echo ""
@@ -581,7 +547,7 @@ EOF
     echo "  • Registry URL: http://$registry_ip:5000"
     echo ""
     log_info "Usage:"
-    echo "  # Push with docker (assuming docker is configured for insecure registry):"
+    echo "  # Push with docker:"
     echo "  docker tag myimage:latest $registry_ip:5000/myimage:latest"
     echo "  docker push $registry_ip:5000/myimage:latest"
     echo ""
@@ -606,10 +572,10 @@ EOF
     fi
     
     echo ""
-    log_info "k3s Commands:"
-    echo "  # Check cluster: kubectl get nodes"
-    echo "  # Check pods: kubectl get pods --all-namespaces"
-    echo "  # Traefik dashboard: kubectl port-forward -n kube-system svc/traefik 9000:9000"
+    log_info "RKE2 Commands:"
+    echo "  # Check status: systemctl status rke2-server"
+    echo "  # Check logs: journalctl -u rke2-server -f"
+    echo "  # RKE2 kubectl: /var/lib/rancher/rke2/bin/kubectl"
 }
 
 # Function to uninstall everything
@@ -617,22 +583,26 @@ uninstall_all() {
     log_info "Uninstalling everything..."
 
     # Uninstall RapidFort Runtime if present
-    if command -v helm &> /dev/null && helm list -n rapidfort 2>/dev/null | grep -q rfruntime; then
-        log_info "Uninstalling RapidFort Runtime..."
-        helm uninstall rfruntime -n rapidfort 2>/dev/null || true
-        kubectl delete namespace rapidfort --force --grace-period=0 2>/dev/null || true
+    if command -v helm &> /dev/null && kubectl get namespace rapidfort &>/dev/null 2>&1; then
+        if helm list -n rapidfort 2>/dev/null | grep -q rfruntime; then
+            log_info "Uninstalling RapidFort Runtime..."
+            helm uninstall rfruntime -n rapidfort 2>/dev/null || true
+            kubectl delete namespace rapidfort --force --grace-period=0 2>/dev/null || true
+        fi
     fi
 
-    if is_k3s_installed; then
-        log_info "Stopping k3s..."
-        systemctl stop k3s 2>/dev/null || true
+    if is_rke2_installed; then
+        log_info "Stopping RKE2..."
+        systemctl stop rke2-server 2>/dev/null || true
+        systemctl disable rke2-server 2>/dev/null || true
 
-        log_info "Removing k3s..."
-        /usr/local/bin/k3s-uninstall.sh 2>/dev/null || true
+        log_info "Running RKE2 uninstall script..."
+        /usr/local/bin/rke2-uninstall.sh 2>/dev/null || true
 
-        log_info "Cleaning up k3s configuration..."
-        rm -rf /etc/rancher/k3s/
-        rm -rf /var/lib/rancher/k3s/
+        log_info "Cleaning up RKE2 configuration..."
+        rm -rf /etc/rancher/rke2
+        rm -rf /var/lib/rancher/rke2
+        rm -f /usr/local/bin/rke2
     fi
 
     # Remove kubeconfig
@@ -653,6 +623,7 @@ uninstall_all() {
 main() {
     local command="${1:-help}"
     local registry_ip=""
+    local rke2_version="$RKE2_VERSION"
 
     shift || true
 
@@ -661,6 +632,10 @@ main() {
         case $1 in
             --registry-ip)
                 registry_ip="$2"
+                shift 2
+                ;;
+            --version)
+                rke2_version="$2"
                 shift 2
                 ;;
             -h|--help)
@@ -676,7 +651,7 @@ main() {
 
     case "$command" in
         "install")
-            install_all "$registry_ip"
+            install_all "$registry_ip" "$rke2_version"
             ;;
         "uninstall")
             uninstall_all

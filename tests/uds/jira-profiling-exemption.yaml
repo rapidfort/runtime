@@ -1,0 +1,16 @@
+apiVersion: uds.dev/v1alpha1
+kind: Exemption
+metadata:
+  name: profile-exemption-jira
+  namespace: uds-policy-exemptions
+spec:
+  exemptions:
+  - matcher:
+      kind: pod
+      name: ^jira.*
+      namespace: jira
+    policies:
+    - DisallowPrivileged
+    - RestrictHostPathWrite
+    - RestrictVolumeTypes
+    title: exempt-for-profiling

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Kind Installation and Management Script
+# k3d Installation and Management Script
 # Usage: ./play.sh [install|uninstall|status|help]
 
 # Source common architecture detection
@@ -21,8 +21,8 @@ NC='\033[0m' # No Color
 
 # Script configuration
 KUBECONFIG_PATH="$HOME/.kube/config"
-KIND_CLUSTER_NAME="kind"
-REGISTRY_NAME="kind-registry"
+K3D_CLUSTER_NAME="${K3D_CLUSTER_NAME:-k3d-cluster}"
+REGISTRY_NAME="${K3D_CLUSTER_NAME}-registry"
 REGISTRY_PORT="5000"
 
 # Logging functions
@@ -42,27 +42,19 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Function to detect host IP if RF_LOCAL_REGISTRY not set
+# Function to detect host IP
 detect_host_ip() {
     local host_ip=""
     
-    # First try RF_LOCAL_REGISTRY
     if [[ -n "$RF_LOCAL_REGISTRY" ]]; then
         echo "$RF_LOCAL_REGISTRY"
         return
     fi
     
-    # Try to get IP from default route
     host_ip=$(ip route get 1.1.1.1 | awk '{print $7; exit}' 2>/dev/null || true)
     
     if [[ -z "$host_ip" ]]; then
-        # Fallback to hostname -I
         host_ip=$(hostname -I | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)
-    fi
-    
-    if [[ -z "$host_ip" ]]; then
-        # Last resort - try to get from network interfaces
-        host_ip=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d'/' -f1 | head -1)
     fi
     
     echo "$host_ip"
@@ -71,20 +63,21 @@ detect_host_ip() {
 # Function to show help
 show_help() {
     cat << EOF
-Kind Installation and Management Script
+k3d Installation and Management Script
 
 USAGE:
     $0 [COMMAND] [OPTIONS]
 
 COMMANDS:
-    install         Install Kind cluster with registry, ingress, and RapidFort Runtime
+    install         Install k3d cluster with registry
     uninstall       Remove everything completely
-    status          Show Kind and registry status
-    deploy-rapidfort Deploy RapidFort Runtime to existing kind cluster
+    status          Show k3d and registry status
+    deploy-rapidfort Deploy RapidFort Runtime to existing k3d cluster
     help            Show this help message
 
 OPTIONS:
     --registry-ip   IP address for registry (optional, defaults to RF_LOCAL_REGISTRY)
+    --cluster-name  k3d cluster name (default: k3d-cluster)
     --local-registry Use local registry for RapidFort images
     --image-tag     Tag for RapidFort images (e.g., 3.1.32-dev6)
     -h, --help      Show this help
@@ -98,22 +91,14 @@ EXAMPLES:
     $0 uninstall
 
 WHAT IT DOES:
-    - Installs Kind (Kubernetes in Docker)
-    - Runs registry container on IP:5000 (HTTP)
-    - Installs NGINX ingress controller
-    - Configures Kind to use the registry
+    - Installs k3d (k3s in Docker)
+    - Creates cluster with built-in registry
+    - Configures ingress controller
     - Automatically deploys RapidFort Runtime if credentials found
 
 PREREQUISITES:
     - Docker should be running
     - RF_LOCAL_REGISTRY environment variable (or --registry-ip)
-    - Docker configured with insecure-registries for IP:5000
-
-RAPIDFORT RUNTIME:
-    - Automatically deployed if both exist:
-      1. ~/.rapidfort/credentials
-      2. Helm installed
-    - Can be deployed later with: $0 deploy-rapidfort
 
 EOF
 }
@@ -122,20 +107,11 @@ EOF
 check_requirements() {
     log_info "Checking system requirements..."
 
-    if [[ ! "$OSTYPE" == "linux-gnu"* ]]; then
-        log_error "This script only supports Linux"
+    if ! command -v docker &> /dev/null; then
+        log_error "Docker is required but not installed"
         exit 1
     fi
-
-    local required_commands=("docker" "curl")
-    for cmd in "${required_commands[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
-            log_error "Required command '$cmd' not found"
-            exit 1
-        fi
-    done
-
-    # Check if docker is running
+    
     if ! docker info &> /dev/null; then
         log_error "Docker is not running. Please start docker first."
         exit 1
@@ -144,34 +120,35 @@ check_requirements() {
     log_success "System requirements check passed"
 }
 
-# Function to check for existing kubeconfig
-check_existing_kubeconfig() {
-    if [[ -f "$KUBECONFIG_PATH" ]]; then
-        log_warning "Existing kubeconfig found at: $KUBECONFIG_PATH"
-        log_warning "Backing it up to: $KUBECONFIG_PATH.backup"
-        mv "$KUBECONFIG_PATH" "$KUBECONFIG_PATH.backup"
+# Function to check if k3d is installed
+is_k3d_installed() {
+    command -v k3d &> /dev/null
+}
+
+# Function to install k3d binary
+install_k3d_binary() {
+    if is_k3d_installed; then
+        log_info "k3d already installed"
+        return
     fi
+
+    log_info "Installing k3d binary..."
+    
+    # Install latest k3d
+    curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+    
+    log_success "k3d binary installed"
 }
 
-# Function to check if kind is installed
-is_kind_installed() {
-    command -v kind &> /dev/null
+# Function to check if k3d cluster is running
+is_k3d_running() {
+    k3d cluster list 2>/dev/null | grep -q "^${K3D_CLUSTER_NAME}"
 }
 
-# Function to check if kind cluster is running
-is_kind_running() {
-    kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER_NAME}$"
-}
-
-# Function to check if registry is running
-is_registry_running() {
-    docker ps --format "table {{.Names}}" | grep -q "^${REGISTRY_NAME}$"
-}
-
-# Function to get kind version
-get_kind_version() {
-    if is_kind_installed; then
-        kind version 2>/dev/null | head -n1 || echo "unknown"
+# Function to get k3d version
+get_k3d_version() {
+    if is_k3d_installed; then
+        k3d version --short 2>/dev/null || echo "unknown"
     else
         echo "not installed"
     fi
@@ -179,38 +156,30 @@ get_kind_version() {
 
 # Function to show status
 show_status() {
-    log_info "Kind Status Report"
+    log_info "k3d Status Report"
     echo "=================="
 
-    if is_kind_installed; then
-        log_success "Kind installed: $(get_kind_version)"
+    if is_k3d_installed; then
+        log_success "k3d installed: $(get_k3d_version)"
     else
-        log_warning "Kind not installed"
+        log_warning "k3d not installed"
         return
     fi
 
-    if is_kind_running; then
-        log_success "Kind cluster '$KIND_CLUSTER_NAME' is running"
+    if is_k3d_running; then
+        log_success "k3d cluster '$K3D_CLUSTER_NAME' is running"
+        
+        echo ""
+        log_info "Cluster info:"
+        k3d cluster list | grep "${K3D_CLUSTER_NAME}"
         
         if command -v kubectl &> /dev/null; then
             echo ""
             log_info "Cluster nodes:"
             kubectl get nodes 2>/dev/null || echo "  Unable to get cluster info"
             
-            # Check ingress
-            if kubectl get namespace ingress-nginx &>/dev/null; then
-                echo ""
-                log_info "NGINX ingress controller:"
-                local ingress_status=$(kubectl get deployment ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
-                if [[ -n "$ingress_status" ]] && [[ "$ingress_status" -gt 0 ]]; then
-                    log_success "NGINX Ingress: Running"
-                else
-                    log_warning "NGINX Ingress: Not ready"
-                fi
-            fi
-            
             # Check RapidFort Runtime
-            if kubectl get namespace rapidfort &>/dev/null; then
+            if kubectl get namespace rapidfort &>/dev/null 2>&1; then
                 echo ""
                 log_info "RapidFort Runtime:"
                 local rf_status=$(kubectl get pods -n rapidfort -l app=rfruntime --no-headers 2>/dev/null | grep -c Running || echo 0)
@@ -223,48 +192,17 @@ show_status() {
             fi
         fi
     else
-        log_warning "Kind cluster not running"
+        log_warning "k3d cluster not running"
     fi
-
-    # Check registry
-    if is_registry_running; then
-        echo ""
-        log_info "Registry status:"
-        log_success "Registry: Running on port $REGISTRY_PORT"
-        local registry_ip=$(docker inspect $REGISTRY_NAME --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)
-        if [[ -n "$registry_ip" ]]; then
-            echo "  Registry Container IP: $registry_ip:$REGISTRY_PORT"
-        fi
-    else
-        echo ""
-        log_warning "Registry: Not running"
-    fi
-}
-
-# Function to install kind binary
-install_kind_binary() {
-    if is_kind_installed; then
-        log_info "Kind already installed"
-        return
-    fi
-
-    log_info "Installing Kind binary..."
-    
-    # Download kind binary
-    curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-$(get_k8s_arch)
-    chmod +x ./kind
-    mv ./kind /usr/local/bin/kind
-    
-    log_success "Kind binary installed"
 }
 
 # Function to deploy RapidFort Runtime
 deploy_rapidfort() {
-    log_info "Deploying RapidFort Runtime to kind cluster"
+    log_info "Deploying RapidFort Runtime to k3d cluster"
     
-    # Check if kind cluster is running
-    if ! kind get clusters 2>/dev/null | grep -q "^kind$" || ! kubectl cluster-info &>/dev/null; then
-        log_error "kind cluster is not running. Install kind first with: $0 install"
+    # Check if k3d cluster is running
+    if ! k3d cluster list 2>/dev/null | grep -q "^${K3D_CLUSTER_NAME}"; then
+        log_error "k3d cluster is not running. Install k3d first with: $0 install"
         exit 1
     fi
     
@@ -341,11 +279,6 @@ deploy_rapidfort() {
     local registry_secret_path="${HOME}/.rapidfort/rapidfort-registry-secret.yaml"
     if [[ -f "$registry_secret_path" ]]; then
         kubectl apply -f "$registry_secret_path" -n rapidfort
-    else
-        log_warning "Registry secret not found at: $registry_secret_path"
-        if [[ "$use_local_registry" == "false" ]]; then
-            log_warning "Registry secret may be required for pulling from quay.io"
-        fi
     fi
     
     # Deploy RapidFort Runtime
@@ -355,10 +288,10 @@ deploy_rapidfort() {
         "upgrade" "--install" "rfruntime"
         "$runtime_chart"
         "--namespace" "rapidfort"
-        "--set" "ClusterName=kind"
-        "--set" "ClusterCaption=kind Cluster"
+        "--set" "ClusterName=k3d"
+        "--set" "ClusterCaption=k3d Cluster"
         "--set" "rapidfort.credentialsSecret=rfruntime-credentials"
-        "--set" "variant=generic"
+        "--set" "variant=k3s"
         "--set" "scan.enabled=true"
         "--set" "profile.enabled=true"
         "--wait" "--timeout=5m"
@@ -366,40 +299,12 @@ deploy_rapidfort() {
     
     # Check if we should use local registry
     if [[ "$use_local_registry" == "true" ]] || [[ "$RF_USE_LOCAL_REGISTRY" == "true" ]]; then
-        use_local_registry=true
-        log_info "Using local registry for RapidFort Runtime images"
-        
-        # Override the registry value in values.yaml
-        helm_args+=(
-            "--set" "registry=$registry_ip:5000/rapidfort"
-        )
-        
-        # If image tag is specified, use it
+        helm_args+=("--set" "registry=$registry_ip:5000/rapidfort")
         if [[ -n "$image_tag" ]]; then
             helm_args+=("--set" "imageTag=$image_tag")
         fi
-        
-        # Set pull policy to Always for local registry
         helm_args+=("--set" "imagePullPolicy=Always")
-        
-        log_info "Note: Make sure all RapidFort images are available in local registry:"
-        echo "  Images needed (example with tag 3.1.32-dev6):"
-        echo "    - $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
-        echo "    - $registry_ip:5000/rapidfort/controller:3.1.32-dev6"
-        echo "    - $registry_ip:5000/rapidfort/rfwrap-init:3.1.32-dev6"
-        echo "    - $registry_ip:5000/rapidfort/bpf:3.1.32-dev6"
-        echo ""
-        echo "  To push images (example):"
-        echo "    docker pull quay.io/rapidfort/sentry:3.1.32-dev6"
-        echo "    docker tag quay.io/rapidfort/sentry:3.1.32-dev6 $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
-        echo "    docker push $registry_ip:5000/rapidfort/sentry:3.1.32-dev6"
-        echo ""
-        echo "  Helm will use registry: $registry_ip:5000/rapidfort"
-        if [[ -n "$image_tag" ]]; then
-            echo "  Image tag: $image_tag"
-        fi
     else
-        # Add imagePullSecrets for quay.io
         if [[ -f "$registry_secret_path" ]]; then
             helm_args+=("--set" "imagePullSecrets.names={rapidfort-registry-secret}")
         fi
@@ -418,14 +323,7 @@ deploy_rapidfort() {
     log_info "Waiting for RapidFort Runtime pods to be ready..."
     if kubectl wait --for=condition=ready pod -l app=rfruntime -n rapidfort --timeout=300s; then
         log_success "RapidFort Runtime deployed successfully"
-        echo ""
         kubectl get pods -n rapidfort -o wide
-        echo ""
-        echo "Commands:"
-        echo "  # Check logs: kubectl logs -n rapidfort -l app=rfruntime -c sentry -f"
-        echo "  # Check scan results: rfjobs"
-        echo "  # Check runtime status: kubectl get pods -n rapidfort"
-        echo "  # Check images being used: kubectl describe pods -n rapidfort | grep Image:"
     else
         log_error "RapidFort Runtime deployment failed"
         kubectl describe pods -n rapidfort
@@ -433,11 +331,10 @@ deploy_rapidfort() {
     fi
 }
 
-# Function to install everything
+# Function to install k3d cluster
 install_all() {
     local registry_ip="$1"
     
-    # If no registry IP provided, use RF_LOCAL_REGISTRY or auto-detect
     if [[ -z "$registry_ip" ]]; then
         registry_ip=$(detect_host_ip)
         if [[ -z "$registry_ip" ]]; then
@@ -446,94 +343,71 @@ install_all() {
         fi
     fi
     
-    log_info "Installing Kind cluster with registry at $registry_ip:$REGISTRY_PORT"
+    log_info "Installing k3d cluster with registry at $registry_ip:$REGISTRY_PORT"
     
     check_requirements
-    check_existing_kubeconfig
     
-    if is_kind_running && is_registry_running; then
-        log_warning "Kind cluster and registry already running"
+    # Check for existing kubeconfig
+    if [[ -f "$KUBECONFIG_PATH" ]]; then
+        log_warning "Existing kubeconfig found, backing up..."
+        mv "$KUBECONFIG_PATH" "$KUBECONFIG_PATH.backup"
+    fi
+    
+    if is_k3d_running; then
+        log_warning "k3d cluster already running"
         show_status
         return 0
     fi
     
-    # Install kind binary
-    install_kind_binary
+    # Install k3d binary
+    install_k3d_binary
     
-    # Create registry container
-    if ! is_registry_running; then
-        log_info "Creating registry container..."
-        docker run -d --restart=always \
-            -p $registry_ip:$REGISTRY_PORT:5000 \
-            --name $REGISTRY_NAME \
-            registry:2
-        
-        # Wait for registry to be ready
-        sleep 5
-        if curl -s "http://$registry_ip:$REGISTRY_PORT/v2/" > /dev/null 2>&1; then
-            log_success "Registry is running at $registry_ip:$REGISTRY_PORT"
-        else
-            log_warning "Registry may not be fully ready yet"
-        fi
-    fi
+    # Create k3d cluster with registry
+    log_info "Creating k3d cluster with registry..."
     
-    # Create kind cluster with registry config
-    if ! is_kind_running; then
-        log_info "Creating Kind cluster..."
-        
-        # Create kind config
-        cat << EOF > /tmp/kind-config.yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-containerdConfigPatches:
-- |-
-  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."$registry_ip:$REGISTRY_PORT"]
-    endpoint = ["http://$REGISTRY_NAME:5000"]
-  [plugins."io.containerd.grpc.v1.cri".registry.configs."$registry_ip:$REGISTRY_PORT".tls]
-    insecure_skip_verify = true
-  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."$REGISTRY_NAME:5000"]
-    endpoint = ["http://$REGISTRY_NAME:5000"]
-  [plugins."io.containerd.grpc.v1.cri".registry.configs."$REGISTRY_NAME:5000".tls]
-    insecure_skip_verify = true
-nodes:
-- role: control-plane
-  kubeadmConfigPatches:
-  - |
-    kind: InitConfiguration
-    nodeRegistration:
-      kubeletExtraArgs:
-        node-labels: "ingress-ready=true"
-  extraPortMappings:
-  - containerPort: 80
-    hostPort: 80
-    protocol: TCP
-  - containerPort: 443
-    hostPort: 443
-    protocol: TCP
+    # Create registry config for k3d
+    cat > /tmp/k3d-registries.yaml << EOF
+mirrors:
+  "${registry_ip}:${REGISTRY_PORT}":
+    endpoint:
+      - "http://${REGISTRY_NAME}:5000"
+  "${REGISTRY_NAME}:5000":
+    endpoint:
+      - "http://${REGISTRY_NAME}:5000"
+configs:
+  "${registry_ip}:${REGISTRY_PORT}":
+    tls:
+      insecure_skip_verify: true
+  "${REGISTRY_NAME}:5000":
+    tls:
+      insecure_skip_verify: true
 EOF
-        
-        # Create the cluster
-        kind create cluster --name $KIND_CLUSTER_NAME --config /tmp/kind-config.yaml
-        
-        # Clean up config file
-        rm -f /tmp/kind-config.yaml
-        
-        log_success "Kind cluster created"
-    fi
+    
+    # Create cluster with registry
+    k3d cluster create "${K3D_CLUSTER_NAME}" \
+        --api-port 6550 \
+        --servers 1 \
+        --agents 0 \
+        --port "80:80@loadbalancer" \
+        --port "443:443@loadbalancer" \
+        --registry-create "${REGISTRY_NAME}:0.0.0.0:${REGISTRY_PORT}" \
+        --registry-config /tmp/k3d-registries.yaml \
+        --k3s-arg "--disable=traefik@server:0" \
+        --wait
+    
+    # Clean up temp file
+    rm -f /tmp/k3d-registries.yaml
     
     # Setup kubeconfig
     log_info "Setting up kubeconfig..."
     mkdir -p ~/.kube
-    kind get kubeconfig --name $KIND_CLUSTER_NAME > "$KUBECONFIG_PATH"
+    k3d kubeconfig get "${K3D_CLUSTER_NAME}" > "$KUBECONFIG_PATH"
     chmod 600 "$KUBECONFIG_PATH"
-    
-    # Connect registry to kind network
-    log_info "Connecting registry to kind network..."
-    docker network connect "kind" $REGISTRY_NAME 2>/dev/null || log_warning "Registry already connected to kind network"
+    export KUBECONFIG="$KUBECONFIG_PATH"
     
     # Install NGINX ingress controller
     log_info "Installing NGINX ingress controller..."
-    kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/cloud/deploy.yaml
     
     # Wait for ingress controller
     log_info "Waiting for ingress controller..."
@@ -552,36 +426,23 @@ EOF
         log_warning "Registry may not be fully ready yet"
     fi
     
-    # Test with a real image
-    log_info "Testing image push/pull..."
-    if command -v docker &> /dev/null; then
-        docker pull hello-world:latest
-        docker tag hello-world:latest $registry_ip:$REGISTRY_PORT/hello-world:test
-        docker push $registry_ip:$REGISTRY_PORT/hello-world:test
-        
-        # Test Kubernetes can pull the image
-        kubectl run test-registry --image=$registry_ip:$REGISTRY_PORT/hello-world:test --command -- sleep 30
-        kubectl wait --for=condition=ready pod/test-registry --timeout=60s && log_success "Kubernetes can pull from registry" || log_warning "Kubernetes pull test failed"
-        kubectl delete pod test-registry --force
-    fi
-    
     log_success "Installation completed!"
     
     echo ""
     log_info "Cluster Details:"
-    echo "  • Kind cluster: $KIND_CLUSTER_NAME"
-    echo "  • Registry URL: http://$registry_ip:$REGISTRY_PORT"
-    echo "  • Ingress: NGINX (ports 80/443 forwarded to host)"
+    echo "  • k3d cluster: $K3D_CLUSTER_NAME"
+    echo "  • Registry: $registry_ip:$REGISTRY_PORT"
+    echo "  • Ingress: NGINX"
     echo ""
     log_info "Usage:"
-    echo "  # Push with docker (assuming docker is configured for insecure registry):"
+    echo "  # Push images:"
     echo "  docker tag myimage:latest $registry_ip:$REGISTRY_PORT/myimage:latest"
     echo "  docker push $registry_ip:$REGISTRY_PORT/myimage:latest"
     echo ""
     echo "  # Use in Kubernetes:"
-    echo "  image: $registry_ip:$REGISTRY_PORT/myimage:latest"
+    echo "  image: ${REGISTRY_NAME}:5000/myimage:latest"
     
-    # Deploy RapidFort Runtime if credentials exist and helm is available
+    # Deploy RapidFort Runtime if credentials exist
     if [[ -f "$HOME/.rapidfort/credentials" ]] && command -v helm &> /dev/null; then
         log_info "Found RapidFort credentials and helm, deploying RapidFort Runtime..."
         deploy_rapidfort
@@ -597,12 +458,6 @@ EOF
         echo "  2. Install helm if not already installed"
         echo "  3. Run: $0 deploy-rapidfort"
     fi
-    
-    echo ""
-    log_info "Kind Commands:"
-    echo "  # Check cluster: kind get clusters"
-    echo "  # Load image: kind load docker-image myimage:latest --name $KIND_CLUSTER_NAME"
-    echo "  # Delete cluster: kind delete cluster --name $KIND_CLUSTER_NAME"
 }
 
 # Function to uninstall everything
@@ -610,7 +465,7 @@ uninstall_all() {
     log_info "Uninstalling everything..."
     
     # Uninstall RapidFort Runtime if present
-    if command -v helm &> /dev/null && is_kind_running && kubectl get namespace rapidfort &>/dev/null 2>&1; then
+    if command -v helm &> /dev/null && kubectl get namespace rapidfort &>/dev/null 2>&1; then
         if helm list -n rapidfort 2>/dev/null | grep -q rfruntime; then
             log_info "Uninstalling RapidFort Runtime..."
             helm uninstall rfruntime -n rapidfort 2>/dev/null || true
@@ -618,17 +473,10 @@ uninstall_all() {
         fi
     fi
     
-    # Delete kind cluster
-    if is_kind_running; then
-        log_info "Deleting Kind cluster..."
-        kind delete cluster --name $KIND_CLUSTER_NAME
-    fi
-    
-    # Remove registry container
-    if is_registry_running; then
-        log_info "Removing registry container..."
-        docker stop $REGISTRY_NAME 2>/dev/null || true
-        docker rm $REGISTRY_NAME 2>/dev/null || true
+    # Delete k3d cluster
+    if is_k3d_running; then
+        log_info "Deleting k3d cluster..."
+        k3d cluster delete "${K3D_CLUSTER_NAME}"
     fi
     
     # Remove kubeconfig
@@ -649,6 +497,7 @@ uninstall_all() {
 main() {
     local command="${1:-help}"
     local registry_ip=""
+    local cluster_name=""
     
     shift || true
     
@@ -657,6 +506,10 @@ main() {
         case $1 in
             --registry-ip)
                 registry_ip="$2"
+                shift 2
+                ;;
+            --cluster-name)
+                K3D_CLUSTER_NAME="$2"
                 shift 2
                 ;;
             -h|--help)

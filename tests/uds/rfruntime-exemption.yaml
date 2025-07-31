@@ -1,0 +1,19 @@
+apiVersion: uds.dev/v1alpha1
+kind: Exemption
+metadata:
+  name: rfruntime
+  namespace: uds-policy-exemptions
+spec:
+  exemptions:
+  - matcher:
+      kind: pod
+      name: ^rfruntime.*
+      namespace: default
+    policies:
+    - DisallowHostNamespaces
+    - DisallowPrivileged
+    - RequireNonRootUser
+    - DropAllCapabilities
+    - RestrictHostPathWrite
+    - RestrictVolumeTypes
+    title: rfruntime-pod
