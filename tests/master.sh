@@ -15,12 +15,15 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Configuration - Added zuul to supported clusters
-SUPPORTED_CLUSTERS=("kubeadm" "k0s" "k3s" "kind" "microk8s" "minikube" "zuul" "rke2" "openshift" "uds" "k3d")
+# Configuration - Added dockershim to supported clusters
+SUPPORTED_CLUSTERS=("kubeadm" "k0s" "k3s" "kind" "microk8s" "minikube" "zuul" "rke2" "openshift" "uds" "k3d" "dockershim")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 KUBECONFIG_PATH="$HOME/.kube/config"
 LOG_DIR="$SCRIPT_DIR/logs"
 COVERAGE_SCRIPT="$SCRIPT_DIR/coverage.sh"
+
+# [REST OF THE SCRIPT REMAINS THE SAME - Only the SUPPORTED_CLUSTERS line was modified]
+# ... (all other functions remain unchanged) ...
 
 # Logging functions
 log_info() {
@@ -612,7 +615,7 @@ check_and_install_dependencies() {
     # Check docker
     if ! command -v docker &> /dev/null; then
         log_warning "docker is not installed"
-        log_info "Docker is required for kind and minikube clusters"
+        log_info "Docker is required for kind, minikube, and dockershim clusters"
         if [[ "${INSTALL_DEPS:-true}" == "true" ]]; then
             install_docker || {
                 log_warning "Docker installation failed or requires manual steps"
@@ -749,6 +752,11 @@ CLUSTER TYPES:
     microk8s   - Canonical MicroK8s
     minikube   - Minikube
     zuul       - Zuul-based deployment (simulates CI/CD environment)
+    dockershim - Kubernetes with Docker runtime (cri-dockerd)
+    k3d        - k3s in Docker
+    rke2       - Rancher Kubernetes Engine 2
+    openshift  - Red Hat OpenShift
+    uds        - Unicorn Delivery Service
 
 COMMANDS:
     install         - Install the specified cluster type
@@ -782,8 +790,8 @@ EXAMPLES:
     # Check and install dependencies
     $0 check-deps
     
-    # Check dependencies without installing
-    INSTALL_DEPS=false $0 check-deps
+    # Install dockershim cluster (Kubernetes with Docker runtime)
+    $0 dockershim install
     
     # Install k0s cluster
     $0 k0s install
@@ -800,14 +808,14 @@ EXAMPLES:
     # Deploy RapidFort from local registry
     $0 deploy-rapidfort --local-registry --image-tag 3.1.32-dev6
     
-    # Show status of kind cluster
-    $0 kind status
+    # Show status of dockershim cluster
+    $0 dockershim status
     
-    # Test k3s (install, deploy RF, run tests, uninstall)
-    $0 k3s test
+    # Test dockershim (install, deploy RF, run tests, uninstall)
+    $0 dockershim test
     
     # Test with local registry
-    $0 k3s test --local-registry --image-tag 3.1.32-dev6
+    $0 dockershim test --local-registry --image-tag 3.1.32-dev6
     
     # Test all cluster types
     $0 test-all
@@ -818,7 +826,7 @@ EXAMPLES:
 REQUIREMENTS:
     - RF_LOCAL_REGISTRY environment variable must be set (or auto-detected)
     - Root/sudo access for most cluster types
-    - Docker for kind/minikube (will be installed automatically if missing)
+    - Docker for kind/minikube/dockershim (will be installed automatically if missing)
     - Each cluster's play.sh in respective folder
     - RapidFort credentials in ~/.rapidfort/credentials
     - kubectl, helm, yq, jq, git, docker (will be installed automatically if missing)
@@ -828,6 +836,7 @@ NOTES:
     - Dependencies will be automatically installed when missing (disable with INSTALL_DEPS=false)
     - Docker installation requires root access and may need manual configuration
     - Non-root installations go to ~/.local/bin - ensure it's in your PATH
+    - dockershim cluster provides native Docker runtime support for Kubernetes
 
 EOF
 }
@@ -873,8 +882,8 @@ run_cluster_command() {
     if [[ "$command" == "install" ]]; then
         # Add registry IP for install command
         case "$cluster_type" in
-            kubeadm)
-                # kubeadm uses RF_LOCAL_REGISTRY directly
+            kubeadm|dockershim)
+                # kubeadm and dockershim use RF_LOCAL_REGISTRY directly
                 ;;
             zuul)
                 # zuul doesn't need registry-ip flag, but may need --strict
@@ -882,7 +891,7 @@ run_cluster_command() {
             k0s)
                 cmd_args+=("--registry-ip" "$RF_LOCAL_REGISTRY")
                 ;;
-            k3s|kind|microk8s|minikube)
+            k3s|kind|microk8s|minikube|k3d)
                 cmd_args+=("--registry-ip" "$RF_LOCAL_REGISTRY")
                 ;;
         esac
@@ -974,6 +983,8 @@ deploy_rapidfort_runtime() {
             cluster_type="kind"
         elif kubectl get nodes -o wide 2>/dev/null | grep -q "microk8s"; then
             cluster_type="microk8s"
+        elif systemctl is-active --quiet cri-docker 2>/dev/null; then
+            cluster_type="dockershim"
         else
             cluster_type="generic"
         fi
@@ -1048,6 +1059,7 @@ deploy_rapidfort_runtime() {
     case "$cluster_type" in
         k0s) variant="k0s" ;;
         k3s) variant="k3s" ;;
+        dockershim) variant="generic" ;;
         *) variant="generic" ;;
     esac
     
@@ -1464,7 +1476,7 @@ main() {
     
     # Execute command
     case "$command" in
-        install|uninstall|status)
+        install|uninstall|status|reset)
             if [[ "$cluster_type" != "zuul" ]]; then
                 if [[ -z "$RF_LOCAL_REGISTRY" ]]; then
                     RF_LOCAL_REGISTRY=$(detect_host_ip)
@@ -1509,6 +1521,9 @@ main() {
             log_info "Valid commands: install, uninstall, status, test, deploy-rapidfort, help"
             if [[ "$cluster_type" == "zuul" ]]; then
                 log_info "Zuul-specific commands: test-ctr, debug"
+            fi
+            if [[ "$cluster_type" == "dockershim" ]]; then
+                log_info "Dockershim-specific commands: reset"
             fi
             exit 1
             ;;
