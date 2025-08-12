@@ -139,6 +139,13 @@ check_requirements() {
         log_warning "This script is tested on Ubuntu/Debian. Your OS: $ID"
     fi
 
+    # Clean up any broken Docker repository configurations
+    if [[ -f /etc/apt/sources.list.d/docker.list ]]; then
+        log_info "Cleaning up existing Docker repository configuration..."
+        rm -f /etc/apt/sources.list.d/docker.list
+        apt-get update 2>/dev/null || true
+    fi
+
     # Check CPU and memory
     local cpu_count=$(nproc)
     local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
@@ -165,6 +172,29 @@ check_requirements() {
 install_docker() {
     log_info "Installing Docker..."
 
+    # Check if Docker is already installed and running
+    if command -v docker &>/dev/null && docker info &>/dev/null; then
+        log_info "Docker is already installed and running"
+        docker --version
+        
+        # Just update the daemon configuration
+        log_info "Updating Docker daemon configuration..."
+        cat > /etc/docker/daemon.json <<EOF
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2",
+  "insecure-registries": ["$(detect_host_ip):5000"]
+}
+EOF
+        systemctl restart docker
+        log_success "Docker configured for cri-dockerd"
+        return 0
+    fi
+
     # Remove old versions
     apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
 
@@ -176,18 +206,41 @@ install_docker() {
         gnupg \
         lsb-release
 
+    # Detect the actual distribution
+    source /etc/os-release
+    local distro_id="${ID}"
+    local distro_codename="${VERSION_CODENAME}"
+    
+    # For Debian testing/sid, use bookworm packages
+    if [[ "$distro_id" == "debian" ]]; then
+        if [[ "$distro_codename" == "trixie" ]] || [[ "$distro_codename" == "sid" ]]; then
+            log_warning "Debian $distro_codename detected, using bookworm packages"
+            distro_codename="bookworm"
+        fi
+    fi
+
     # Add Docker's official GPG key
     mkdir -p /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    curl -fsSL "https://download.docker.com/linux/${distro_id}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
     # Set up repository
     echo \
-        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-        $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${distro_id} \
+        ${distro_codename} stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
     # Install Docker
     apt-get update
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    
+    # Try to install Docker CE
+    if ! apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+        log_warning "Failed to install docker-ce, trying docker.io package..."
+        # Fall back to distribution's Docker package
+        apt-get install -y docker.io docker-compose || {
+            log_error "Failed to install Docker from any source"
+            log_info "You may need to install Docker manually"
+            return 1
+        }
+    fi
 
     # Start and enable Docker
     systemctl enable docker
@@ -208,7 +261,14 @@ EOF
 
     systemctl restart docker
     
-    log_success "Docker installed and configured"
+    # Verify Docker is working
+    if docker info &>/dev/null; then
+        log_success "Docker installed and configured"
+        docker --version
+    else
+        log_error "Docker installation completed but Docker daemon is not running"
+        return 1
+    fi
 }
 
 # Function to install cri-dockerd
@@ -294,15 +354,36 @@ install_kubernetes() {
     apt-get update
     apt-get install -y apt-transport-https ca-certificates curl
 
-    # Add Kubernetes GPG key
-    curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    # Detect distribution details
+    source /etc/os-release
+    local distro_id="${ID}"
+    local distro_codename="${VERSION_CODENAME}"
+
+    # Add Kubernetes GPG key (new key location for 1.28+)
+    if [[ ! -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg ]]; then
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    fi
 
     # Add Kubernetes repository
     echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
 
-    # Install kubelet, kubeadm, kubectl
+    # Update package list
     apt-get update
-    apt-get install -y kubelet kubeadm kubectl
+
+    # Install specific versions to ensure compatibility
+    local kube_version="${K8S_VERSION}-*"
+    
+    # Try to install the specified version
+    if ! apt-get install -y kubelet="${kube_version}" kubeadm="${kube_version}" kubectl="${kube_version}"; then
+        log_warning "Failed to install Kubernetes ${K8S_VERSION}, trying latest 1.28.x"
+        # Fall back to latest 1.28.x version
+        apt-get install -y kubelet kubeadm kubectl || {
+            log_error "Failed to install Kubernetes components"
+            return 1
+        }
+    fi
+
+    # Hold packages to prevent accidental upgrades
     apt-mark hold kubelet kubeadm kubectl
 
     # Configure kubelet to use cri-dockerd
@@ -314,6 +395,7 @@ EOF
     systemctl enable kubelet
 
     log_success "Kubernetes components installed"
+    kubectl version --client --short 2>/dev/null || kubectl version --client
 }
 
 # Function to initialize Kubernetes cluster
